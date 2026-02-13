@@ -1,0 +1,28 @@
+{
+  "name": "pi-telegram-agent-stack",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm --workspace packages/contracts run build && npm --workspace apps/orchestrator run build && npm --workspace apps/vm-worker run build && npm --workspace apps/telegram-gateway run build",
+    "pi-self": "node bin/pi-self.mjs",
+    "up": "node bin/pi-self.mjs up",
+    "doctor": "node bin/pi-self.mjs doctor",
+    "dev:orchestrator": "npm --workspace apps/orchestrator run dev",
+    "dev:worker": "npm --workspace apps/vm-worker run dev",
+    "dev:gateway": "npm --workspace apps/telegram-gateway run dev"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "dotenv": "^16.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
