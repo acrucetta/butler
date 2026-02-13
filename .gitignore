@@ -6,3 +6,6 @@ dist
 .data/*.json
 .data/**/*.json
 .DS_Store
+packages/contracts/src/*.js
+packages/contracts/src/*.js.map
+packages/contracts/src/*.d.ts
