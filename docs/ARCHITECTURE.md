@@ -1,37 +1,53 @@
 # Architecture
 
 This document captures the current architecture of the personal Pi + Telegram agent stack.
-Update it as you add features.
+Update it as you add features and keep diagrams aligned with code.
 
-## System diagram
+Related operating docs:
+- `AGENTS.md`
+- `docs/PLANS.md`
+- `docs/SECURITY.md`
+- `docs/RELIABILITY.md`
+
+## Runtime topology (implemented)
 
 ```mermaid
-flowchart TD
-    TG[Telegram Users] -->|messages| GW[telegram-gateway]
-    GW -->|create/status/approve/abort| ORCH[orchestrator API]
-    GW -->|admin pause/resume| ORCH
+flowchart LR
+    TG[Telegram users] -->|messages| GW[telegram-gateway]
 
-    ORCH -->|claim next job| WORKER[vm-worker]
-    WORKER -->|worker events + complete/fail| ORCH
-    ORCH -->|job/events polling| GW
+    subgraph Control_Plane
+      GW -->|create/status/approve/abort| ORCH[orchestrator API]
+      GW -->|poll job + event stream| ORCH
+    end
 
-    WORKER -->|RPC commands/events| PI[pi --mode rpc]
+    subgraph Execution_Plane
+      WORKER[vm-worker] -->|RPC prompt/abort| PI[pi runtime]
+    end
 
-    GW --> PAIR[(pairings.json)]
-    ORCH --> STATE[(orchestrator state.json)]
-    WORKER --> SESS[(Pi session files)]
+    WORKER -->|claim/heartbeat/events/complete/fail| ORCH
 
-    CLI[pi-self CLI] -->|doctor/up| GW
-    CLI -->|doctor/up| ORCH
-    CLI -->|doctor/up| WORKER
+    CLI[pi-self CLI] -. doctor/up .-> GW
+    CLI -. doctor/up .-> ORCH
+    CLI -. doctor/up .-> WORKER
 ```
 
-## Runtime model
+## Persistence surfaces
 
-- `telegram-gateway` is the control surface for users.
-- `orchestrator` owns queue and job lifecycle.
-- `vm-worker` runs in sandbox VM and executes jobs.
-- `pi` runtime is accessed by worker in RPC mode (or mock mode for local testing).
+```mermaid
+flowchart TB
+    GW[telegram-gateway] --> PAIR[(.data/gateway/pairings.json)]
+    ORCH[orchestrator] --> STATE[(.data/orchestrator/state.json)]
+    WORKER[vm-worker] --> SESS[(.data/worker/sessions/*)]
+    WORKER --> WS[(.data/worker/workspace)]
+```
+
+## Component responsibilities
+
+- `telegram-gateway` handles Telegram commands, pairing, role checks, rate limits, and job status updates.
+- `orchestrator` is the source of truth for job state, queueing, event history, and global pause state.
+- `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
+- `pi` runtime is only invoked by `vm-worker`.
+- `packages/contracts` defines request/response schemas shared by gateway, orchestrator, and worker.
 
 ## Job lifecycle
 
@@ -52,6 +68,19 @@ stateDiagram-v2
     aborting --> aborted: worker acknowledges abort
 ```
 
+## Implementation alignment
+
+The code follows the same boundaries shown above:
+
+- Gateway command handling and policy checks: `apps/telegram-gateway/src/index.ts`
+- Gateway pairing state persistence: `apps/telegram-gateway/src/pairing-store.ts`
+- Gateway client for orchestrator HTTP API: `apps/telegram-gateway/src/orchestrator-client.ts`
+- Orchestrator API routes and auth separation (gateway token vs worker token): `apps/orchestrator/src/index.ts`
+- Orchestrator job queue/state machine and JSON persistence: `apps/orchestrator/src/store.ts`
+- Worker claim loop, heartbeat, and completion/failure flow: `apps/vm-worker/src/index.ts`
+- Worker Pi RPC session lifecycle: `apps/vm-worker/src/pi-rpc-session.ts`
+- Shared schemas/contracts at API boundaries: `packages/contracts/src/index.ts`
+
 ## Security and policy implemented
 
 - Pairing gate for unknown Telegram users.
@@ -63,7 +92,7 @@ stateDiagram-v2
 - Rate limiting and max prompt length in gateway.
 - Global panic switch (`/panic on|off`) pauses worker claims.
 
-## Current interfaces
+## HTTP interfaces
 
 ### Gateway -> Orchestrator
 

@@ -22,6 +22,23 @@ Telegram
 
 Detailed, living architecture doc (with Mermaid): `docs/ARCHITECTURE.md`
 
+## Agent harness
+
+This repo now includes a spec-driven harness for agent workflows:
+
+- Entry map: `AGENTS.md`
+- Planning flow: `docs/PLANS.md`
+- Plan template: `docs/exec-plans/PLAN_TEMPLATE.md`
+- Local workflow skill: `.agents/skills/spec-driven-execution/SKILL.md`
+- OpenAI reference notes: `docs/references/openai-agent-harness-best-practices.md`
+
+Run harness checks locally:
+
+```bash
+npm run harness:check
+npm run verify:harness
+```
+
 ## Telegram commands
 
 - `/whoami`: show your Telegram user ID

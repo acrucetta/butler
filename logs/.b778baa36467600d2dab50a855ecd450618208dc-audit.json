@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "/Users/acrucettanieto/Documents/Git/claude-connect/logs/.b778baa36467600d2dab50a855ecd450618208dc-audit.json",
+    "files": [
+        {
+            "date": 1771024581951,
+            "name": "/Users/acrucettanieto/Documents/Git/claude-connect/logs/mcp-puppeteer-2026-02-13.log",
+            "hash": "564869098bb2d386032fac309aaea5b2057bf6df8b5309ccf624c9fc728c0250"
+        }
+    ],
+    "hashType": "sha256"
+}
