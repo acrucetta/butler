@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { delimiter, resolve } from "node:path";
 import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
 import { OrchestratorClient } from "./orchestrator-client.js";
 import { PiRpcSessionPool } from "./pi-rpc-session.js";
@@ -16,9 +16,14 @@ const piProvider = process.env.PI_PROVIDER;
 const piModel = process.env.PI_MODEL;
 const piCwd = resolve(process.env.PI_WORKSPACE ?? ".data/worker/workspace");
 const piSessionRoot = resolve(process.env.PI_SESSION_ROOT ?? ".data/worker/sessions");
+const piAppendSystemPrompt = process.env.PI_APPEND_SYSTEM_PROMPT ?? defaultMemoryPrompt();
+const mcpCliBinDir = resolve(process.env.BUTLER_MCP_BIN_DIR ?? ".data/mcp/bin");
 
 mkdirSync(piCwd, { recursive: true });
 mkdirSync(piSessionRoot, { recursive: true });
+mkdirSync(mcpCliBinDir, { recursive: true });
+bootstrapWorkspaceMemory(piCwd);
+process.env.PATH = prependPathEntry(mcpCliBinDir, process.env.PATH);
 
 const orchestrator = new OrchestratorClient(orchestratorBaseUrl, workerToken);
 const sessionPool = new PiRpcSessionPool({
@@ -26,7 +31,8 @@ const sessionPool = new PiRpcSessionPool({
   cwd: piCwd,
   sessionRoot: piSessionRoot,
   provider: piProvider,
-  model: piModel
+  model: piModel,
+  appendSystemPrompt: piAppendSystemPrompt
 });
 
 let shuttingDown = false;
@@ -43,6 +49,8 @@ async function run(): Promise<void> {
   console.log(`[worker] started workerId=${workerId} mode=${executionMode} orchestrator=${orchestratorBaseUrl}`);
   if (executionMode === "rpc") {
     console.log(`[worker] rpc mode enabled with PI_BINARY=${piBinary}`);
+    console.log(`[worker] rpc workspace=${piCwd}`);
+    console.log(`[worker] rpc sessions=${piSessionRoot}`);
   }
 
   while (!shuttingDown) {
@@ -123,7 +131,8 @@ async function runJob(job: Job): Promise<void> {
   }, 1200);
 
   try {
-    const result = await session.prompt(job.prompt, {
+    const preparedPrompt = buildPromptWithWorkspaceContext(job.prompt, piCwd);
+    const result = await session.prompt(preparedPrompt, {
       onTextDelta(delta) {
         fullText += delta;
         deltaBuffer += delta;
@@ -242,4 +251,125 @@ function requireSecret(name: string, value: string | undefined): string {
     throw new Error(`${name} must be at least 16 characters`);
   }
   return value;
+}
+
+function prependPathEntry(entry: string, currentPath: string | undefined): string {
+  const values = (currentPath ?? "").split(delimiter).filter((part) => part.length > 0);
+  if (values.includes(entry)) {
+    return values.join(delimiter);
+  }
+  return [entry, ...values].join(delimiter);
+}
+
+function bootstrapWorkspaceMemory(workspaceRoot: string): void {
+  const memoryDir = resolve(workspaceRoot, "memory");
+  const memoryFile = resolve(workspaceRoot, "MEMORY.md");
+  const todayFile = resolve(memoryDir, `${formatLocalDate(new Date())}.md`);
+
+  mkdirSync(memoryDir, { recursive: true });
+
+  writeIfMissing(
+    memoryFile,
+    [
+      "# MEMORY",
+      "",
+      "Long-term durable facts and user preferences for this agent.",
+      "",
+      "- Keep entries short and factual.",
+      "- Update this when a user explicitly asks to remember something important.",
+      ""
+    ].join("\n")
+  );
+
+  writeIfMissing(
+    todayFile,
+    [
+      `# ${formatLocalDate(new Date())}`,
+      "",
+      "Daily notes for short-lived context and handoff breadcrumbs.",
+      ""
+    ].join("\n")
+  );
+}
+
+function writeIfMissing(filePath: string, content: string): void {
+  if (existsSync(filePath)) {
+    return;
+  }
+  writeFileSync(filePath, content, "utf8");
+}
+
+function formatLocalDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function defaultMemoryPrompt(): string {
+  return [
+    "OpenClaw-style memory policy:",
+    "- Treat workspace Markdown files as source of truth.",
+    "- Load personality from SOUL.md.",
+    "- Use MEMORY.md for durable user preferences and stable facts.",
+    "- Use memory/YYYY-MM-DD.md for short-lived daily notes.",
+    "- If user says to remember something, write it to MEMORY.md or today's memory file.",
+    "- Keep memory concise and accurate; do not invent facts.",
+    "- Continue using the session transcript normally, but persist durable facts to files."
+  ].join("\n");
+}
+
+function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: string): string {
+  const soulPath = resolve(workspaceRoot, "SOUL.md");
+  const memoryPath = resolve(workspaceRoot, "MEMORY.md");
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const dailyFiles = [today, yesterday].map((value) =>
+    resolve(workspaceRoot, "memory", `${formatLocalDate(value)}.md`)
+  );
+
+  const sections: string[] = [];
+  const soul = readTextIfExists(soulPath, 5_000);
+  if (soul) {
+    sections.push(`## SOUL.md\n${soul}`);
+  }
+
+  const durable = readTextIfExists(memoryPath, 5_000);
+  if (durable) {
+    sections.push(`## MEMORY.md\n${durable}`);
+  }
+
+  for (const filePath of dailyFiles) {
+    const daily = readTextIfExists(filePath, 3_000);
+    if (daily) {
+      const name = filePath.split("/").at(-1) ?? "memory.md";
+      sections.push(`## memory/${name}\n${daily}`);
+    }
+  }
+
+  if (sections.length === 0) {
+    return userPrompt;
+  }
+
+  return [
+    "Workspace context snapshot (OpenClaw-style personality and memory).",
+    "Treat this as active context. Do not repeat it verbatim to the user.",
+    sections.join("\n\n"),
+    "## User request",
+    userPrompt
+  ].join("\n\n");
+}
+
+function readTextIfExists(filePath: string, maxChars: number): string {
+  if (!existsSync(filePath)) {
+    return "";
+  }
+
+  const content = readFileSync(filePath, "utf8").trim();
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  return `${content.slice(content.length - maxChars)}\n\n[truncated to latest ${maxChars} chars]`;
 }

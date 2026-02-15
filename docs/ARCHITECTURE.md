@@ -16,12 +16,19 @@ flowchart TD
     ORCH -->|job/events polling| GW
 
     WORKER -->|RPC commands/events| PI[pi --mode rpc]
+    WORKER -->|PATH includes generated wrappers| MCPBIN[.data/mcp/bin]
+    WORKER --> PMEM[(SOUL.md + MEMORY.md + memory/YYYY-MM-DD.md)]
 
     GW --> PAIR[(pairings.json)]
+    GW --> SCTX[(sessions.json)]
     ORCH --> STATE[(orchestrator state.json)]
     WORKER --> SESS[(Pi session files)]
+    CLI -->|mcp sync| MCPCFG[config/mcp-clis.json]
+    CLI -->|mcporter config| MCPDEF[config/mcporter.json]
+    CLI -->|generate-cli/emit-ts| MCPBIN
 
-    CLI[pi-self CLI] -->|doctor/up| GW
+    CLI[butler CLI] -->|setup (writes .env)| ENV[.env]
+    CLI -->|doctor/up| GW
     CLI -->|doctor/up| ORCH
     CLI -->|doctor/up| WORKER
 ```
@@ -32,6 +39,11 @@ flowchart TD
 - `orchestrator` owns queue and job lifecycle.
 - `vm-worker` runs in sandbox VM and executes jobs.
 - `pi` runtime is accessed by worker in RPC mode (or mock mode for local testing).
+- In RPC mode, worker defaults PI workspace to repo root so `SOUL.md`, `MEMORY.md`, and `memory/YYYY-MM-DD.md` are shared personality/memory context files.
+- Gateway tracks per-chat/per-thread context keys in `sessions.json`; `/new` and `/reset` rotate to fresh context.
+- `butler` CLI is the operator entrypoint for setup (`setup`), validation (`doctor`), and local process orchestration (`up`).
+- `butler mcp` manages MCP-to-CLI generation via `mcporter` (`init`, `list`, `sync`).
+- Gateway can run in agent-only reply mode (`TG_ONLY_AGENT_OUTPUT=true`) so Telegram receives only final agent text.
 
 ## Job lifecycle
 
@@ -62,6 +74,7 @@ stateDiagram-v2
 - Optional requester abort is configurable.
 - Rate limiting and max prompt length in gateway.
 - Global panic switch (`/panic on|off`) pauses worker claims.
+- Context reset controls (`/new`, `/reset`) are chat/thread-scoped.
 
 ## Current interfaces
 

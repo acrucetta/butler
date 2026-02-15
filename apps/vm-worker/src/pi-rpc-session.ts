@@ -34,6 +34,7 @@ export interface PiRpcSessionOptions {
   sessionKey: string;
   provider?: string;
   model?: string;
+  appendSystemPrompt?: string;
   env?: Record<string, string>;
 }
 
@@ -187,6 +188,9 @@ export class PiRpcSession {
     if (this.options.model) {
       args.push("--model", this.options.model);
     }
+    if (this.options.appendSystemPrompt) {
+      args.push("--append-system-prompt", this.options.appendSystemPrompt);
+    }
 
     const child = spawn(this.options.piBinary, args, {
       cwd: this.options.cwd,
@@ -319,6 +323,7 @@ export class PiRpcSessionPool {
       sessionRoot: string;
       provider?: string;
       model?: string;
+      appendSystemPrompt?: string;
       env?: Record<string, string>;
     }
   ) {}
