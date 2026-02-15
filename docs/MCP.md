@@ -29,12 +29,32 @@ The repo needs a first-class path to consume MCP servers and expose them as loca
 - `butler mcp list`
 - `butler mcp sync`
 
-## Starter target
+## Starter targets
 
 - `codex` is preconfigured:
   - Server config in `config/mcporter.json`
   - CLI target in `config/mcp-clis.json`
   - Selector: `codex`
+- `brave-search` is preconfigured:
+  - Server package: `@modelcontextprotocol/server-brave-search`
+  - CLI target selector: `brave-search`
+  - Requires runtime `BRAVE_API_KEY` in the worker environment
+
+## Brave Search setup
+
+1. Create a Brave Search API key (Brave "Data for Search" plan).
+2. Set `BRAVE_API_KEY` in your `.env` (and in the worker host environment for production).
+3. Regenerate wrappers:
+
+```bash
+npm run butler -- mcp sync
+```
+
+4. Confirm targets:
+
+```bash
+npm run butler -- mcp list
+```
 
 ## Acceptance criteria
 

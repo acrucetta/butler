@@ -1,0 +1,343 @@
+{
+  "jobs": {
+    "dc19c5f4-3de3-4639-bfcc-e6c8e8927e88": {
+      "id": "dc19c5f4-3de3-4639-bfcc-e6c8e8927e88",
+      "kind": "task",
+      "status": "completed",
+      "prompt": "say hello from local test",
+      "channel": "telegram",
+      "chatId": "local-chat",
+      "requesterId": "local-user",
+      "sessionKey": "telegram:local-chat:test",
+      "requiresApproval": false,
+      "abortRequested": false,
+      "createdAt": "2026-02-15T05:19:53.259Z",
+      "updatedAt": "2026-02-15T05:19:58.557Z",
+      "workerId": "CW-CF0CQGPYH2-L-34196",
+      "startedAt": "2026-02-15T05:19:54.917Z",
+      "resultText": "[mock-worker] This is a simulated Pi response.\n\nPrompt: say hello from local test\nSession: telegram:local-chat:test\nTimestamp: 2026-02-15T05:19:58.555Z",
+      "finishedAt": "2026-02-15T05:19:58.557Z"
+    },
+    "e70ee64b-4be9-4936-846f-0a87bf7aabbd": {
+      "id": "e70ee64b-4be9-4936-846f-0a87bf7aabbd",
+      "kind": "task",
+      "status": "completed",
+      "prompt": "Hi",
+      "channel": "telegram",
+      "chatId": "7646338597",
+      "requesterId": "7646338597",
+      "sessionKey": "telegram:7646338597:v1",
+      "requiresApproval": false,
+      "abortRequested": false,
+      "createdAt": "2026-02-15T05:27:11.301Z",
+      "updatedAt": "2026-02-15T05:27:15.655Z",
+      "workerId": "CW-CF0CQGPYH2-L-35383",
+      "startedAt": "2026-02-15T05:27:12.001Z",
+      "resultText": "[mock-worker] This is a simulated Pi response.\n\nPrompt: Hi\nSession: telegram:7646338597:v1\nTimestamp: 2026-02-15T05:27:15.649Z",
+      "finishedAt": "2026-02-15T05:27:15.655Z"
+    },
+    "ef62273c-8771-43ea-9e3c-ec66bacb965b": {
+      "id": "ef62273c-8771-43ea-9e3c-ec66bacb965b",
+      "kind": "task",
+      "status": "completed",
+      "prompt": "Hi",
+      "channel": "telegram",
+      "chatId": "7646338597",
+      "requesterId": "7646338597",
+      "sessionKey": "telegram:7646338597:v1",
+      "requiresApproval": false,
+      "abortRequested": false,
+      "createdAt": "2026-02-15T05:29:59.718Z",
+      "updatedAt": "2026-02-15T05:30:03.740Z",
+      "workerId": "CW-CF0CQGPYH2-L-35383",
+      "startedAt": "2026-02-15T05:30:00.102Z",
+      "resultText": "[mock-worker] This is a simulated Pi response.\n\nPrompt: Hi\nSession: telegram:7646338597:v1\nTimestamp: 2026-02-15T05:30:03.739Z",
+      "finishedAt": "2026-02-15T05:30:03.740Z"
+    },
+    "8451b65f-33fc-424e-95a7-102587119db1": {
+      "id": "8451b65f-33fc-424e-95a7-102587119db1",
+      "kind": "task",
+      "status": "completed",
+      "prompt": "Hi",
+      "channel": "telegram",
+      "chatId": "7646338597",
+      "requesterId": "7646338597",
+      "sessionKey": "telegram:7646338597:v1",
+      "requiresApproval": false,
+      "abortRequested": false,
+      "createdAt": "2026-02-15T05:30:10.703Z",
+      "updatedAt": "2026-02-15T05:30:15.408Z",
+      "workerId": "CW-CF0CQGPYH2-L-35383",
+      "startedAt": "2026-02-15T05:30:11.760Z",
+      "resultText": "[mock-worker] This is a simulated Pi response.\n\nPrompt: Hi\nSession: telegram:7646338597:v1\nTimestamp: 2026-02-15T05:30:15.406Z",
+      "finishedAt": "2026-02-15T05:30:15.408Z"
+    },
+    "289abbdb-daaa-49a0-94ad-e987a7914828": {
+      "id": "289abbdb-daaa-49a0-94ad-e987a7914828",
+      "kind": "task",
+      "status": "completed",
+      "prompt": "Hi",
+      "channel": "telegram",
+      "chatId": "7646338597",
+      "requesterId": "7646338597",
+      "sessionKey": "telegram:7646338597:v1",
+      "requiresApproval": false,
+      "abortRequested": false,
+      "createdAt": "2026-02-15T05:31:27.775Z",
+      "updatedAt": "2026-02-15T05:31:34.517Z",
+      "workerId": "CW-CF0CQGPYH2-L-36181",
+      "startedAt": "2026-02-15T05:31:28.674Z",
+      "resultText": "Hi there! How can I help you today? I'm ready to assist with coding, file operations, or any other tasks you need.",
+      "finishedAt": "2026-02-15T05:31:34.517Z"
+    },
+    "a0b8ab6d-4d17-4ada-bad7-b6deada16cdc": {
+      "id": "a0b8ab6d-4d17-4ada-bad7-b6deada16cdc",
+      "kind": "task",
+      "status": "completed",
+      "prompt": "Tell me a joke",
+      "channel": "telegram",
+      "chatId": "7646338597",
+      "requesterId": "7646338597",
+      "sessionKey": "telegram:7646338597:v1",
+      "requiresApproval": false,
+      "abortRequested": false,
+      "createdAt": "2026-02-15T05:37:01.935Z",
+      "updatedAt": "2026-02-15T05:37:07.092Z",
+      "workerId": "CW-CF0CQGPYH2-L-36947",
+      "startedAt": "2026-02-15T05:37:02.515Z",
+      "resultText": "Why do programmers prefer dark mode?\n\nBecause light attracts bugs. 🐛",
+      "finishedAt": "2026-02-15T05:37:07.092Z"
+    }
+  },
+  "events": {
+    "dc19c5f4-3de3-4639-bfcc-e6c8e8927e88": [
+      {
+        "type": "job_created",
+        "ts": "2026-02-15T05:19:53.259Z",
+        "message": "Job created and queued"
+      },
+      {
+        "type": "job_started",
+        "ts": "2026-02-15T05:19:54.917Z",
+        "message": "Job claimed by worker CW-CF0CQGPYH2-L-34196"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:19:54.924Z",
+        "message": "Worker started execution"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:19:54.930Z",
+        "message": "Booting sandbox session"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:19:55.835Z",
+        "message": "Planning task"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:19:56.741Z",
+        "message": "Running mock operations"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:19:57.649Z",
+        "message": "Collecting output"
+      },
+      {
+        "type": "job_finished",
+        "ts": "2026-02-15T05:19:58.557Z",
+        "message": "Job finished successfully"
+      }
+    ],
+    "e70ee64b-4be9-4936-846f-0a87bf7aabbd": [
+      {
+        "type": "job_created",
+        "ts": "2026-02-15T05:27:11.301Z",
+        "message": "Job created and queued"
+      },
+      {
+        "type": "job_started",
+        "ts": "2026-02-15T05:27:12.001Z",
+        "message": "Job claimed by worker CW-CF0CQGPYH2-L-35383"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:27:12.008Z",
+        "message": "Worker started execution"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:27:12.016Z",
+        "message": "Booting sandbox session"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:27:12.923Z",
+        "message": "Planning task"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:27:13.833Z",
+        "message": "Running mock operations"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:27:14.742Z",
+        "message": "Collecting output"
+      },
+      {
+        "type": "job_finished",
+        "ts": "2026-02-15T05:27:15.655Z",
+        "message": "Job finished successfully"
+      }
+    ],
+    "ef62273c-8771-43ea-9e3c-ec66bacb965b": [
+      {
+        "type": "job_created",
+        "ts": "2026-02-15T05:29:59.718Z",
+        "message": "Job created and queued"
+      },
+      {
+        "type": "job_started",
+        "ts": "2026-02-15T05:30:00.102Z",
+        "message": "Job claimed by worker CW-CF0CQGPYH2-L-35383"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:00.110Z",
+        "message": "Worker started execution"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:00.115Z",
+        "message": "Booting sandbox session"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:01.019Z",
+        "message": "Planning task"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:01.926Z",
+        "message": "Running mock operations"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:02.834Z",
+        "message": "Collecting output"
+      },
+      {
+        "type": "job_finished",
+        "ts": "2026-02-15T05:30:03.740Z",
+        "message": "Job finished successfully"
+      }
+    ],
+    "8451b65f-33fc-424e-95a7-102587119db1": [
+      {
+        "type": "job_created",
+        "ts": "2026-02-15T05:30:10.703Z",
+        "message": "Job created and queued"
+      },
+      {
+        "type": "job_started",
+        "ts": "2026-02-15T05:30:11.760Z",
+        "message": "Job claimed by worker CW-CF0CQGPYH2-L-35383"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:11.764Z",
+        "message": "Worker started execution"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:11.771Z",
+        "message": "Booting sandbox session"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:12.679Z",
+        "message": "Planning task"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:13.589Z",
+        "message": "Running mock operations"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:30:14.500Z",
+        "message": "Collecting output"
+      },
+      {
+        "type": "job_finished",
+        "ts": "2026-02-15T05:30:15.408Z",
+        "message": "Job finished successfully"
+      }
+    ],
+    "289abbdb-daaa-49a0-94ad-e987a7914828": [
+      {
+        "type": "job_created",
+        "ts": "2026-02-15T05:31:27.775Z",
+        "message": "Job created and queued"
+      },
+      {
+        "type": "job_started",
+        "ts": "2026-02-15T05:31:28.674Z",
+        "message": "Job claimed by worker CW-CF0CQGPYH2-L-36181"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:31:28.677Z",
+        "message": "Worker started execution"
+      },
+      {
+        "type": "agent_text_delta",
+        "ts": "2026-02-15T05:31:34.515Z",
+        "data": {
+          "delta": "\n\nHi there! How can I help you today? I'm ready to assist with coding, file operations, or any other tasks you need."
+        }
+      },
+      {
+        "type": "job_finished",
+        "ts": "2026-02-15T05:31:34.517Z",
+        "message": "Job finished successfully"
+      }
+    ],
+    "a0b8ab6d-4d17-4ada-bad7-b6deada16cdc": [
+      {
+        "type": "job_created",
+        "ts": "2026-02-15T05:37:01.935Z",
+        "message": "Job created and queued"
+      },
+      {
+        "type": "job_started",
+        "ts": "2026-02-15T05:37:02.515Z",
+        "message": "Job claimed by worker CW-CF0CQGPYH2-L-36947"
+      },
+      {
+        "type": "log",
+        "ts": "2026-02-15T05:37:02.521Z",
+        "message": "Worker started execution"
+      },
+      {
+        "type": "agent_text_delta",
+        "ts": "2026-02-15T05:37:07.086Z",
+        "data": {
+          "delta": "\n\nWhy do programmers prefer dark mode?\n\nBecause light attracts bugs. 🐛"
+        }
+      },
+      {
+        "type": "job_finished",
+        "ts": "2026-02-15T05:37:07.092Z",
+        "message": "Job finished successfully"
+      }
+    ]
+  },
+  "queue": [],
+  "paused": false,
+  "pauseUpdatedAt": "2026-02-15T05:19:36.847Z"
+}

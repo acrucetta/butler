@@ -164,7 +164,7 @@ npm run butler -- mcp init
 ```
 
 2. Add MCP servers in `config/mcporter.json` and generation targets in `config/mcp-clis.json`.
-   The repo now includes a starter `codex` target.
+   The repo now includes starter `codex` and `brave-search` targets.
 
 3. Generate wrappers:
 
@@ -184,6 +184,15 @@ Generated artifacts default to:
 - runnable wrappers: `.data/mcp/bin`
 
 `butler up` and `vm-worker` prepend `.data/mcp/bin` to `PATH` so generated wrappers are available to runtime tools.
+
+### Brave Search MCP
+
+The `brave-search` target uses `@modelcontextprotocol/server-brave-search`.
+Set `BRAVE_API_KEY` in `.env` (and on your production worker host), then run:
+
+```bash
+npm run butler -- mcp sync
+```
 
 ## Security/hardening defaults in this repo
 

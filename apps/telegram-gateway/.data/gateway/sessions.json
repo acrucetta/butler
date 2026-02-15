@@ -1,0 +1,13 @@
+{
+  "sessionsByRouteKey": {
+    "chat:7646338597": {
+      "routeKey": "chat:7646338597",
+      "chatId": "7646338597",
+      "sessionKey": "telegram:7646338597:v1",
+      "generation": 1,
+      "createdAt": "2026-02-15T05:27:11.243Z",
+      "updatedAt": "2026-02-15T05:37:01.892Z",
+      "lastResetAt": "2026-02-15T05:27:11.243Z"
+    }
+  }
+}
