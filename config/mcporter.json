@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "codex": {
+      "description": "Local Codex MCP server",
+      "command": "codex",
+      "args": [
+        "mcp-server"
+      ]
+    }
+  },
+  "imports": [
+    "cursor",
+    "claude-code",
+    "claude-desktop",
+    "codex",
+    "windsurf",
+    "opencode",
+    "vscode"
+  ]
+}

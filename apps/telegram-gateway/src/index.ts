@@ -3,6 +3,7 @@ import { isTerminalStatus } from "@pi-self/contracts";
 import { Bot } from "grammy";
 import { OrchestratorClient } from "./orchestrator-client.js";
 import { PairingStore } from "./pairing-store.js";
+import { SessionStore } from "./session-store.js";
 
 class SlidingWindowRateLimiter {
   private readonly buckets = new Map<string, number[]>();
@@ -45,9 +46,11 @@ const runOwnerOnly = parseBoolean(process.env.TG_RUN_OWNER_ONLY, true);
 const approveOwnerOnly = parseBoolean(process.env.TG_APPROVE_OWNER_ONLY, true);
 const allowRequesterAbort = parseBoolean(process.env.TG_ALLOW_REQUESTER_ABORT, true);
 const notifyToolEvents = parseBoolean(process.env.TG_NOTIFY_TOOL_EVENTS, false);
+const onlyAgentOutput = parseBoolean(process.env.TG_ONLY_AGENT_OUTPUT, true);
 const owners = splitCsv(process.env.TG_OWNER_IDS ?? "");
 const allowFrom = splitCsv(process.env.TG_ALLOW_FROM ?? "");
 const pairingsFile = process.env.TG_PAIRINGS_FILE ?? ".data/gateway/pairings.json";
+const sessionsFile = process.env.TG_SESSIONS_FILE ?? ".data/gateway/sessions.json";
 
 if (owners.length === 0) {
   throw new Error("TG_OWNER_IDS must include at least one Telegram user ID");
@@ -56,6 +59,7 @@ if (owners.length === 0) {
 const bot = new Bot(botToken);
 const orchestrator = new OrchestratorClient(orchestratorBaseUrl, gatewayToken);
 const pairings = new PairingStore(pairingsFile, owners, allowFrom);
+const sessions = new SessionStore(sessionsFile);
 const activeTrackers = new Set<string>();
 const rateLimiter = new SlidingWindowRateLimiter(rateLimitPerMinute, 60_000);
 
@@ -64,6 +68,7 @@ bot.on("message:text", async (ctx) => {
     const text = ctx.message.text.trim();
     const fromId = String(ctx.from?.id ?? "");
     const chatId = String(ctx.chat.id);
+    const threadId = ctx.message.message_thread_id ? String(ctx.message.message_thread_id) : undefined;
 
     if (!fromId) {
       return;
@@ -135,6 +140,11 @@ bot.on("message:text", async (ctx) => {
       return;
     }
 
+    if (text === "/status") {
+      await handleStatusSummary(ctx, chatId, threadId);
+      return;
+    }
+
     if (text.startsWith("/status ")) {
       const jobId = text.slice("/status ".length).trim();
       if (!jobId) {
@@ -165,6 +175,23 @@ bot.on("message:text", async (ctx) => {
       }
 
       await handleAbortJob(ctx, fromId, chatId, jobId);
+      return;
+    }
+
+    if (text === "/context") {
+      await handleContext(ctx, chatId, threadId);
+      return;
+    }
+
+    if (text === "/new" || text.startsWith("/new ")) {
+      const remainder = text.slice("/new".length).trim();
+      await handleResetSession(ctx, fromId, chatId, threadId, remainder);
+      return;
+    }
+
+    if (text === "/reset" || text.startsWith("/reset ")) {
+      const remainder = text.slice("/reset".length).trim();
+      await handleResetSession(ctx, fromId, chatId, threadId, remainder);
       return;
     }
 
@@ -270,11 +297,60 @@ async function handlePanic(ctx: any, text: string): Promise<void> {
   await ctx.reply("Usage: /panic [status|on|off]");
 }
 
+async function handleStatusSummary(ctx: any, chatId: string, threadId?: string): Promise<void> {
+  const admin = await orchestrator.getAdminState();
+  const session = sessions.getSession(chatId, threadId);
+
+  await ctx.reply([
+    "Gateway status:",
+    renderAdminState(admin),
+    renderSessionSummary(session.chatId, session.threadId, session.sessionKey, session.generation, session.lastResetAt),
+    `active_trackers: ${activeTrackers.size}`
+  ].join("\n"));
+}
+
+async function handleContext(ctx: any, chatId: string, threadId?: string): Promise<void> {
+  const session = sessions.getSession(chatId, threadId);
+  await ctx.reply([
+    "Session context:",
+    renderSessionSummary(session.chatId, session.threadId, session.sessionKey, session.generation, session.lastResetAt),
+    `created: ${session.createdAt}`,
+    `updated: ${session.updatedAt}`,
+    `route: ${session.routeKey}`
+  ].join("\n"));
+}
+
+async function handleResetSession(
+  ctx: any,
+  fromId: string,
+  chatId: string,
+  threadId: string | undefined,
+  promptAfterReset: string
+): Promise<void> {
+  const session = sessions.resetSession(chatId, threadId);
+  await ctx.reply([
+    "Session reset.",
+    renderSessionSummary(session.chatId, session.threadId, session.sessionKey, session.generation, session.lastResetAt)
+  ].join("\n"));
+
+  if (!promptAfterReset) {
+    return;
+  }
+
+  const limited = await enforcePromptPolicies(ctx, fromId, promptAfterReset);
+  if (!limited) {
+    return;
+  }
+
+  await submitJob(ctx, promptAfterReset, "task", false);
+}
+
 async function submitJob(ctx: any, prompt: string, kind: "task" | "run", requiresApproval: boolean): Promise<void> {
   const fromId = String(ctx.from?.id ?? "");
   const chatId = String(ctx.chat.id);
   const threadId = ctx.message.message_thread_id ? String(ctx.message.message_thread_id) : undefined;
-  const sessionKey = threadId ? `telegram:${chatId}:thread:${threadId}` : `telegram:${chatId}`;
+  const session = sessions.touchSession(chatId, threadId);
+  const sessionKey = session.sessionKey;
 
   const admin = await orchestrator.getAdminState();
   const job = await orchestrator.createJob({
@@ -289,14 +365,18 @@ async function submitJob(ctx: any, prompt: string, kind: "task" | "run", require
     metadata: kind === "run" ? { command: prompt } : undefined
   });
 
-  await sendThreadMessage(chatId, threadId, [
-    `Job created: ${job.id}`,
-    `status: ${job.status}`,
-    admin.paused ? "Execution is paused (/panic on). Job will wait." : undefined,
-    requiresApproval ? `Use /approve ${job.id} to run it.` : "Running..."
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n"));
+  if (requiresApproval) {
+    await sendThreadMessage(chatId, threadId, `Pending approval. Use /approve ${job.id} to run it.`);
+  } else if (!onlyAgentOutput) {
+    await sendThreadMessage(chatId, threadId, [
+      `Job created: ${job.id}`,
+      `status: ${job.status}`,
+      admin.paused ? "Execution is paused (/panic on). Job will wait." : undefined,
+      "Running..."
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n"));
+  }
 
   if (job.status !== "needs_approval") {
     void trackJob(job.chatId, job.threadId, job.id);
@@ -386,12 +466,12 @@ async function trackJob(chatId: string, threadId: string | undefined, jobId: str
       cursor = events.nextCursor;
 
       for (const event of events.events) {
-        if (event.type === "job_started" && !runningNotified) {
+        if (!onlyAgentOutput && event.type === "job_started" && !runningNotified) {
           runningNotified = true;
           await sendThreadMessage(chatId, threadId, `Job ${jobId} started in VM.`);
         }
 
-        if (notifyToolEvents && event.type === "tool_start" && event.data?.toolName) {
+        if (!onlyAgentOutput && notifyToolEvents && event.type === "tool_start" && event.data?.toolName) {
           await sendThreadMessage(chatId, threadId, `Tool: ${String(event.data.toolName)} started.`);
         }
       }
@@ -416,7 +496,9 @@ async function sendTerminalJobMessage(chatId: string, threadId: string | undefin
     const result = job.resultText?.trim() || "(No output)";
     const chunks = splitMessage(result, 3500);
 
-    await sendThreadMessage(chatId, threadId, `Job ${job.id} completed.`);
+    if (!onlyAgentOutput) {
+      await sendThreadMessage(chatId, threadId, `Job ${job.id} completed.`);
+    }
     for (const chunk of chunks) {
       await sendThreadMessage(chatId, threadId, chunk);
     }
@@ -424,7 +506,7 @@ async function sendTerminalJobMessage(chatId: string, threadId: string | undefin
   }
 
   if (job.status === "aborted") {
-    await sendThreadMessage(chatId, threadId, `Job ${job.id} aborted.`);
+    await sendThreadMessage(chatId, threadId, onlyAgentOutput ? "Execution aborted." : `Job ${job.id} aborted.`);
     return;
   }
 
@@ -476,6 +558,24 @@ function renderAdminState(admin: { paused: boolean; pauseReason?: string; update
     .join("\n");
 }
 
+function renderSessionSummary(
+  chatId: string,
+  threadId: string | undefined,
+  sessionKey: string,
+  generation: number,
+  lastResetAt: string
+): string {
+  return [
+    `chat: ${chatId}`,
+    threadId ? `thread: ${threadId}` : undefined,
+    `session: ${sessionKey}`,
+    `session_generation: ${generation}`,
+    `session_reset_at: ${lastResetAt}`
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
 function splitCsv(value: string): string[] {
   return value
     .split(",")
@@ -491,7 +591,11 @@ function helpText(): string {
     "/run <command> - create a command job (approval required)",
     "/approve <jobId> - approve a pending /run job",
     "/abort <jobId> - request abort",
-    "/status <jobId> - fetch status",
+    "/status - show gateway/session status for this chat",
+    "/status <jobId> - fetch status for a specific job",
+    "/context - show current chat session context key",
+    "/new [prompt] - reset session context; optional prompt runs in new session",
+    "/reset [prompt] - same as /new",
     "/panic [status|on|off] - pause/resume execution (owner)",
     "/pairings - list pending pairings (owner)",
     "/approvepair <code> - approve pairing (owner)",

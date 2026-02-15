@@ -9,9 +9,10 @@
   ],
   "scripts": {
     "build": "npm --workspace packages/contracts run build && npm --workspace apps/orchestrator run build && npm --workspace apps/vm-worker run build && npm --workspace apps/telegram-gateway run build",
+    "butler": "node bin/butler.mjs",
     "pi-self": "node bin/pi-self.mjs",
-    "up": "node bin/pi-self.mjs up",
-    "doctor": "node bin/pi-self.mjs doctor",
+    "up": "node bin/butler.mjs up",
+    "doctor": "node bin/butler.mjs doctor",
     "harness:check": "node bin/check-agent-harness.mjs",
     "verify:harness": "npm run harness:check && npm run build",
     "dev:orchestrator": "npm --workspace apps/orchestrator run dev",

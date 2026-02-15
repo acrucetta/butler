@@ -5,6 +5,7 @@ dist
 .env
 .data/*.json
 .data/**/*.json
+.data/mcp/
 .DS_Store
 packages/contracts/src/*.js
 packages/contracts/src/*.js.map

@@ -1,0 +1,14 @@
+{
+  "mcporterConfigPath": "config/mcporter.json",
+  "templateDir": ".data/mcp/templates",
+  "typesDir": ".data/mcp/types",
+  "binDir": ".data/mcp/bin",
+  "targets": [
+    {
+      "name": "codex",
+      "selector": "codex",
+      "emitTypes": true,
+      "timeoutMs": 120000
+    }
+  ]
+}
