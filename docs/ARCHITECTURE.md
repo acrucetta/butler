@@ -32,6 +32,7 @@ flowchart LR
     CLI -. doctor/up .-> GW
     CLI -. doctor/up .-> ORCH
     CLI -. doctor/up .-> WORKER
+    CLI -. mcp init/list/sync .-> MCPCFG[config/mcp-clis.json + config/mcporter.json]
     CLI -. mcp sync .-> MCPBIN
 ```
 
@@ -44,6 +45,8 @@ flowchart TB
     ORCH[orchestrator] --> STATE[(.data/orchestrator/state.json)]
     WORKER[vm-worker] --> SESS[(.data/worker/sessions/*)]
     WORKER --> WS[(PI_WORKSPACE)]
+    MCPCFG[(config/mcporter.json + config/mcp-clis.json)] --> MCPOUT[(.data/mcp/templates + .data/mcp/types + .data/mcp/bin)]
+    MCPOUT --> WORKER
     WS --> PMEM[(SOUL.md + MEMORY.md + memory/YYYY-MM-DD.md)]
 ```
 
@@ -53,6 +56,7 @@ flowchart TB
 - `orchestrator` is the source of truth for job state, queueing, event history, and global pause state.
 - `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
 - `pi` runtime is only invoked by `vm-worker`.
+- `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
 - In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
 - `packages/contracts` defines request/response schemas shared by gateway, orchestrator, and worker.
 
@@ -98,8 +102,9 @@ The code follows the same boundaries shown above:
 - Non-owner users can only view their own jobs in their own chat.
 - Optional requester abort is configurable.
 - Rate limiting and max prompt length in gateway.
+- Chat/session context is isolated per `chatId + threadId` and rotated with `/new` or `/reset`.
+- Telegram output defaults to agent-text-only (`TG_ONLY_AGENT_OUTPUT=true`), while approval and lifecycle notices remain available when needed.
 - Global panic switch (`/panic on|off`) pauses worker claims.
-- Context reset controls (`/new`, `/reset`) are chat/thread-scoped.
 
 ## HTTP interfaces
 

@@ -19,5 +19,5 @@
 
 ## Recovery Patterns
 - Use `/panic on` before risky maintenance.
-- Restart only affected service first, then run `/status <jobId>` to confirm impact.
+- Restart only affected service first, then run `/status` for control-plane health or `/status <jobId>` for a specific job.
 - If state persistence is suspected, inspect `.data/orchestrator/state.json` and events.
