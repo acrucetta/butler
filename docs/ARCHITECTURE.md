@@ -25,10 +25,14 @@ flowchart LR
     end
 
     WORKER -->|claim/heartbeat/events/complete/fail| ORCH
+    WORKER -->|PATH includes generated wrappers| MCPBIN[.data/mcp/bin]
+    WORKER --> PMEM[(SOUL.md + MEMORY.md + memory/YYYY-MM-DD.md)]
 
-    CLI[pi-self CLI] -. doctor/up .-> GW
+    CLI[butler CLI] -. setup .-> ENV[.env]
+    CLI -. doctor/up .-> GW
     CLI -. doctor/up .-> ORCH
     CLI -. doctor/up .-> WORKER
+    CLI -. mcp sync .-> MCPBIN
 ```
 
 ## Persistence surfaces
@@ -36,9 +40,11 @@ flowchart LR
 ```mermaid
 flowchart TB
     GW[telegram-gateway] --> PAIR[(.data/gateway/pairings.json)]
+    GW --> SCTX[(.data/gateway/sessions.json)]
     ORCH[orchestrator] --> STATE[(.data/orchestrator/state.json)]
     WORKER[vm-worker] --> SESS[(.data/worker/sessions/*)]
-    WORKER --> WS[(.data/worker/workspace)]
+    WORKER --> WS[(PI_WORKSPACE)]
+    WS --> PMEM[(SOUL.md + MEMORY.md + memory/YYYY-MM-DD.md)]
 ```
 
 ## Component responsibilities
@@ -47,6 +53,7 @@ flowchart TB
 - `orchestrator` is the source of truth for job state, queueing, event history, and global pause state.
 - `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
 - `pi` runtime is only invoked by `vm-worker`.
+- In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
 - `packages/contracts` defines request/response schemas shared by gateway, orchestrator, and worker.
 
 ## Job lifecycle
@@ -74,6 +81,7 @@ The code follows the same boundaries shown above:
 
 - Gateway command handling and policy checks: `apps/telegram-gateway/src/index.ts`
 - Gateway pairing state persistence: `apps/telegram-gateway/src/pairing-store.ts`
+- Gateway session context persistence: `apps/telegram-gateway/src/session-store.ts`
 - Gateway client for orchestrator HTTP API: `apps/telegram-gateway/src/orchestrator-client.ts`
 - Orchestrator API routes and auth separation (gateway token vs worker token): `apps/orchestrator/src/index.ts`
 - Orchestrator job queue/state machine and JSON persistence: `apps/orchestrator/src/store.ts`
@@ -91,6 +99,7 @@ The code follows the same boundaries shown above:
 - Optional requester abort is configurable.
 - Rate limiting and max prompt length in gateway.
 - Global panic switch (`/panic on|off`) pauses worker claims.
+- Context reset controls (`/new`, `/reset`) are chat/thread-scoped.
 
 ## HTTP interfaces
 
