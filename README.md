@@ -97,6 +97,8 @@ TG_OWNER_IDS=<your-telegram-user-id>
 TG_SESSIONS_FILE=.data/gateway/sessions.json
 # optional: only send final agent text in Telegram (default true)
 TG_ONLY_AGENT_OUTPUT=true
+# optional: render final agent text as Telegram MarkdownV2 (default true)
+TG_AGENT_MARKDOWNV2=true
 # optional: explicit Pi runtime controls
 PI_EXEC_MODE=rpc
 PI_BINARY=pi

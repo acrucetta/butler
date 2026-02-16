@@ -4,6 +4,7 @@ import { Bot } from "grammy";
 import { OrchestratorClient } from "./orchestrator-client.js";
 import { PairingStore } from "./pairing-store.js";
 import { SessionStore } from "./session-store.js";
+import { toTelegramMarkdownV2 } from "./telegram-markdown.js";
 
 class SlidingWindowRateLimiter {
   private readonly buckets = new Map<string, number[]>();
@@ -47,6 +48,7 @@ const approveOwnerOnly = parseBoolean(process.env.TG_APPROVE_OWNER_ONLY, true);
 const allowRequesterAbort = parseBoolean(process.env.TG_ALLOW_REQUESTER_ABORT, true);
 const notifyToolEvents = parseBoolean(process.env.TG_NOTIFY_TOOL_EVENTS, false);
 const onlyAgentOutput = parseBoolean(process.env.TG_ONLY_AGENT_OUTPUT, true);
+const agentMarkdownV2 = parseBoolean(process.env.TG_AGENT_MARKDOWNV2, true);
 const owners = splitCsv(process.env.TG_OWNER_IDS ?? "");
 const allowFrom = splitCsv(process.env.TG_ALLOW_FROM ?? "");
 const pairingsFile = process.env.TG_PAIRINGS_FILE ?? ".data/gateway/pairings.json";
@@ -494,13 +496,13 @@ async function trackJob(chatId: string, threadId: string | undefined, jobId: str
 async function sendTerminalJobMessage(chatId: string, threadId: string | undefined, job: Job): Promise<void> {
   if (job.status === "completed") {
     const result = job.resultText?.trim() || "(No output)";
-    const chunks = splitMessage(result, 3500);
+    const chunks = splitMessage(result, agentMarkdownV2 ? 2800 : 3500);
 
     if (!onlyAgentOutput) {
       await sendThreadMessage(chatId, threadId, `Job ${job.id} completed.`);
     }
     for (const chunk of chunks) {
-      await sendThreadMessage(chatId, threadId, chunk);
+      await sendThreadMessage(chatId, threadId, chunk, agentMarkdownV2 ? "markdownv2" : "plain");
     }
     return;
   }
@@ -516,21 +518,40 @@ async function sendTerminalJobMessage(chatId: string, threadId: string | undefin
   }
 }
 
-async function sendThreadMessage(chatId: string, threadId: string | undefined, text: string): Promise<void> {
+type TelegramMessageFormat = "plain" | "markdownv2";
+
+async function sendThreadMessage(
+  chatId: string,
+  threadId: string | undefined,
+  text: string,
+  format: TelegramMessageFormat = "plain"
+): Promise<void> {
   const chat = Number(chatId);
   if (Number.isNaN(chat)) {
     throw new Error(`invalid chat id: ${chatId}`);
   }
 
-  if (threadId) {
-    const thread = Number(threadId);
-    await bot.api.sendMessage(chat, text, {
-      message_thread_id: Number.isNaN(thread) ? undefined : thread
-    });
-    return;
+  const thread = threadId ? Number(threadId) : undefined;
+  const messageThreadId = threadId && !Number.isNaN(thread) ? thread : undefined;
+
+  if (format === "markdownv2") {
+    try {
+      await bot.api.sendMessage(chat, toTelegramMarkdownV2(text), {
+        message_thread_id: messageThreadId,
+        parse_mode: "MarkdownV2"
+      });
+      return;
+    } catch (error) {
+      if (!isTelegramEntityParseError(error)) {
+        throw error;
+      }
+      console.warn(`[gateway] MarkdownV2 send failed, falling back to plain text: ${formatError(error)}`);
+    }
   }
 
-  await bot.api.sendMessage(chat, text);
+  await bot.api.sendMessage(chat, text, {
+    message_thread_id: messageThreadId
+  });
 }
 
 function renderJobStatus(job: Job): string {
@@ -632,6 +653,11 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function isTelegramEntityParseError(error: unknown): boolean {
+  const text = formatError(error).toLowerCase();
+  return text.includes("can't parse entities") || text.includes("parse entities");
 }
 
 function requireEnv(name: string, value: string | undefined): string {
