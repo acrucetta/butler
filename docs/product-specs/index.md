@@ -5,6 +5,7 @@
 - `docs/product-specs/openclaw-features.md`: candidate OpenClaw capabilities to evaluate for Butler roadmap.
 - `docs/product-specs/proactive-runtime.md`: behavior and config contract for proactive triggers (heartbeat/cron/webhook).
 - `docs/product-specs/model-routing.md`: worker model profile routing, fallback, and cooldown behavior.
+- `docs/product-specs/tool-policy.md`: worker tool allow/deny policy layering and enforcement behavior.
 
 ## Authoring Rules
 - Capture user-observable behavior and acceptance criteria.

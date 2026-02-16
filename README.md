@@ -42,6 +42,21 @@ npm run harness:check
 npm run verify:harness
 ```
 
+## TDD loop (minimal setup)
+
+Use red/green/refactor with built-in node tests (via `tsx --test`):
+
+```bash
+# run all current tests
+npm run test
+
+# focus loop for worker policy/runtime work
+npm run test:worker
+
+# focus loop for telegram formatting work
+npm run test:gateway
+```
+
 ## Telegram commands
 
 - `/whoami`: show your Telegram user ID
@@ -106,6 +121,8 @@ PI_PROVIDER=openrouter
 PI_MODEL=moonshotai/kimi-k2.5
 # optional: OpenClaw-style model profile routing + fallback
 # PI_MODEL_ROUTING_FILE=.data/worker/model-routing.json
+# optional: OpenClaw-style tool allow/deny policy
+# PI_TOOL_POLICY_FILE=.data/worker/tool-policy.json
 # optional: defaults are set by butler CLI when omitted
 # PI_WORKSPACE=<repo-root>
 # PI_SESSION_ROOT=<repo-root>/.data/worker/sessions
@@ -180,6 +197,24 @@ Worker supports profile-based model routing with fallback/cooldown behavior.
 - Job metadata can pin a profile with `modelProfile`.
 
 If no routing file exists, worker keeps legacy single-model behavior (`PI_PROVIDER` + `PI_MODEL`).
+
+## OpenClaw-style tool policy (allow/deny layer)
+
+Worker supports a lightweight, layered tool policy that is evaluated on tool invocation events.
+
+- Scaffold defaults with one command:
+  - `npm run butler -- policy init`
+- Provide tool policy config at `PI_TOOL_POLICY_FILE` (or `.data/worker/tool-policy.json` if present).
+- Use `config/tool-policy.example.json` as a template.
+- Layer order is: `default` -> `byKind.<task|run>` -> `byProfile.<profileId>`.
+- `deny` always wins over `allow`.
+- If `allow` is set for a layer, it replaces prior allow patterns at that layer boundary.
+- If no policy file exists, Butler keeps backward-compatible allow-all behavior.
+- On denied tool invocation, worker logs the policy decision, aborts the active RPC attempt, and fails the job.
+
+Pattern notes:
+- Exact match: `read_file`
+- Wildcards: `browser_*`, `*_write`, `*`
 
 ## Proactive runtime (heartbeats, cron, webhooks)
 

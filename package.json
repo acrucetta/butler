@@ -9,6 +9,9 @@
   ],
   "scripts": {
     "build": "npm --workspace packages/contracts run build && npm --workspace apps/orchestrator run build && npm --workspace apps/vm-worker run build && npm --workspace apps/telegram-gateway run build",
+    "test": "npm --workspace apps/telegram-gateway run test && npm --workspace apps/vm-worker run test",
+    "test:gateway": "npm --workspace apps/telegram-gateway run test",
+    "test:worker": "npm --workspace apps/vm-worker run test",
     "butler": "node bin/butler.mjs",
     "pi-self": "node bin/pi-self.mjs",
     "up": "node bin/butler.mjs up",

@@ -15,6 +15,7 @@
 - Telegram/API connectivity issues can delay command processing.
 - Invalid proactive config blocks orchestrator startup to avoid silent misfires.
 - Invalid model routing profile/env mapping can block worker startup.
+- Invalid tool policy config can block worker startup.
 
 ## Operational Checks
 - Startup checks: `npm run doctor`

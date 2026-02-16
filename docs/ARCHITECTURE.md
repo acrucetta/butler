@@ -60,6 +60,7 @@ flowchart TB
 - `orchestrator` also hosts proactive trigger runtime (heartbeats, cron rules, webhook ingress) and enqueues regular jobs.
 - `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
 - `vm-worker` includes model routing that selects a profile chain (by job kind/metadata) and performs guarded fallback.
+- `vm-worker` enforces worker-local tool policy rules (allow/deny) during RPC tool invocation.
 - `pi` runtime is only invoked by `vm-worker`.
 - `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
 - In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
@@ -147,6 +148,7 @@ The code follows the same boundaries shown above:
 - Worker claim loop, heartbeat, and completion/failure flow: `apps/vm-worker/src/index.ts`
 - Worker Pi RPC session lifecycle: `apps/vm-worker/src/pi-rpc-session.ts`
 - Worker model routing and fallback runtime: `apps/vm-worker/src/model-routing.ts`
+- Worker tool policy runtime: `apps/vm-worker/src/tool-policy.ts`
 - Shared schemas/contracts at API boundaries: `packages/contracts/src/index.ts`
 
 ## Security and policy implemented
@@ -159,6 +161,7 @@ The code follows the same boundaries shown above:
 - Optional requester abort is configurable.
 - Rate limiting and max prompt length in gateway.
 - Chat/session context is isolated per `chatId + threadId` and rotated with `/new` or `/reset`.
+- Worker-local tool policy can deny runtime tools by job kind/profile and fail denied invocations.
 - Telegram output defaults to agent-text-only (`TG_ONLY_AGENT_OUTPUT=true`), while approval and lifecycle notices remain available when needed.
 - Global panic switch (`/panic on|off`) pauses worker claims.
 
@@ -195,4 +198,4 @@ The code follows the same boundaries shown above:
 - Add Telegram webhook mode + secret token validation.
 - Add inline keyboard actions for approve/abort/status.
 - Add per-job artifact upload/download path.
-- Add explicit policy engine (tool allow/deny, command classes).
+- Expand tool policy from worker-local config to orchestrator-managed policy controls.

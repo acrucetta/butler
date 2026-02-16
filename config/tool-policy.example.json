@@ -1,0 +1,38 @@
+{
+  "default": {
+    "allow": [
+      "*"
+    ],
+    "deny": [
+      "unsafe_*"
+    ]
+  },
+  "byKind": {
+    "task": {
+      "allow": [
+        "read_file",
+        "list_files",
+        "search_file_content",
+        "web_search",
+        "fetch_url"
+      ],
+      "deny": [
+        "run_shell_command",
+        "edit_file",
+        "write_file"
+      ]
+    },
+    "run": {
+      "allow": [
+        "*"
+      ]
+    }
+  },
+  "byProfile": {
+    "fallback-openai": {
+      "deny": [
+        "browser_*"
+      ]
+    }
+  }
+}

@@ -12,6 +12,7 @@
 - `/run` command must remain approval-gated and owner-only by default.
 - API calls between services must be authenticated (`x-api-key` or bearer token).
 - Keep prompt length and rate-limit protections enabled.
+- Keep worker tool policy configured for least privilege by job kind/profile when risky tools are available.
 
 ## Security Review Triggers
 - Any change to authz/authn logic.

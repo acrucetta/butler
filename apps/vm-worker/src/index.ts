@@ -4,6 +4,7 @@ import { delimiter, resolve } from "node:path";
 import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
 import { ModelRoutingRuntime } from "./model-routing.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
+import { ToolPolicyRuntime } from "./tool-policy.js";
 
 const orchestratorBaseUrl = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8787";
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
@@ -19,6 +20,8 @@ const piSessionRoot = resolve(process.env.PI_SESSION_ROOT ?? ".data/worker/sessi
 const piAppendSystemPrompt = process.env.PI_APPEND_SYSTEM_PROMPT ?? defaultMemoryPrompt();
 const modelRoutingConfigFile = resolve(process.env.PI_MODEL_ROUTING_FILE ?? ".data/worker/model-routing.json");
 const modelRoutingConfigRequired = Boolean(process.env.PI_MODEL_ROUTING_FILE);
+const toolPolicyConfigFile = resolve(process.env.PI_TOOL_POLICY_FILE ?? ".data/worker/tool-policy.json");
+const toolPolicyConfigRequired = Boolean(process.env.PI_TOOL_POLICY_FILE);
 const mcpCliBinDir = resolve(process.env.BUTLER_MCP_BIN_DIR ?? ".data/mcp/bin");
 
 mkdirSync(piCwd, { recursive: true });
@@ -39,6 +42,11 @@ const modelRouting = new ModelRoutingRuntime({
   requireConfigFile: modelRoutingConfigRequired,
   logger: console
 });
+const toolPolicy = new ToolPolicyRuntime({
+  configFilePath: toolPolicyConfigFile,
+  requireConfigFile: toolPolicyConfigRequired,
+  logger: console
+});
 
 let shuttingDown = false;
 
@@ -57,6 +65,7 @@ async function run(): Promise<void> {
     console.log(`[worker] rpc workspace=${piCwd}`);
     console.log(`[worker] rpc sessions=${piSessionRoot}`);
     console.log(`[worker] model routing config=${modelRoutingConfigFile} source=${modelRouting.getSourceLabel()}`);
+    console.log(`[worker] tool policy config=${toolPolicyConfigFile} source=${toolPolicy.getSourceLabel()}`);
   }
 
   while (!shuttingDown) {
@@ -163,11 +172,23 @@ async function runJob(job: Job): Promise<void> {
         "log",
         `Model attempt ${attempt + 1}/${plan.maxAttempts}: ${profile.id} (${profile.provider ?? "default"}/${profile.model ?? "default"})`
       );
+      const policyContext = toolPolicy.resolveContext(job.kind, profile.id);
+      const allowSummary = policyContext.allow === null ? "*" : policyContext.allow.join(", ");
+      const denySummary = policyContext.deny.length > 0 ? policyContext.deny.join(", ") : "(none)";
+      await postEvent(
+        job.id,
+        "log",
+        `Tool policy for attempt: allow=[${allowSummary}] deny=[${denySummary}]`
+      );
 
       const session = modelRouting.getSession(profile.id, job.sessionKey);
       activeSession = session;
 
       try {
+        let policyViolationMessage: string | null = null;
+        let policyAbortSent = false;
+        const blockedTools = new Set<string>();
+
         const result = await session.prompt(preparedPrompt, {
           onTextDelta(delta) {
             attemptHadOutput = true;
@@ -176,16 +197,36 @@ async function runJob(job: Job): Promise<void> {
           },
           onToolStart(toolName) {
             attemptHadToolActivity = true;
+
+            const decision = policyContext.evaluateTool(toolName);
+            if (!decision.allowed) {
+              blockedTools.add(toolName);
+              policyViolationMessage = `Tool policy denied '${toolName}' (reason=${decision.reason}${decision.matchedDenyPattern ? ` pattern=${decision.matchedDenyPattern}` : ""})`;
+              void postEvent(job.id, "log", policyViolationMessage);
+              if (!policyAbortSent && activeSession) {
+                policyAbortSent = true;
+                void activeSession.abort();
+              }
+              return;
+            }
+
             void postEvent(job.id, "tool_start", `Tool started: ${toolName}`, { toolName });
           },
           onToolEnd(toolName) {
             attemptHadToolActivity = true;
+            if (blockedTools.has(toolName)) {
+              return;
+            }
             void postEvent(job.id, "tool_end", `Tool finished: ${toolName}`, { toolName });
           },
           onLog(message) {
             void postEvent(job.id, "log", message);
           }
         });
+
+        if (policyViolationMessage) {
+          throw new Error(policyViolationMessage);
+        }
 
         modelRouting.markSuccess(profile.id);
         await flushDelta();

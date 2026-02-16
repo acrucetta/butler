@@ -18,6 +18,8 @@ const DEFAULT_MCPORTER_CONFIG_PATH = "config/mcporter.json";
 const DEFAULT_MCP_TEMPLATE_DIR = ".data/mcp/templates";
 const DEFAULT_MCP_TYPES_DIR = ".data/mcp/types";
 const DEFAULT_MCP_BIN_DIR = ".data/mcp/bin";
+const DEFAULT_TOOL_POLICY_SOURCE_PATH = "config/tool-policy.example.json";
+const DEFAULT_TOOL_POLICY_OUTPUT_PATH = ".data/worker/tool-policy.json";
 
 export async function runButlerCli(options = {}) {
   const cliName = options.cliName ?? "butler";
@@ -177,6 +179,54 @@ export async function runButlerCli(options = {}) {
     });
 
   const mcp = program.command("mcp").description("Manage MCP server CLI wrappers via mcporter");
+  const policy = program.command("policy").description("Manage worker tool policy config");
+
+  policy
+    .command("init")
+    .description("Create worker tool policy config from default example")
+    .option("--output-path <path>", "path to generated policy file", DEFAULT_TOOL_POLICY_OUTPUT_PATH)
+    .option("--source-path <path>", "path to source policy template", DEFAULT_TOOL_POLICY_SOURCE_PATH)
+    .option("--force", "overwrite existing policy file")
+    .action((cmdOptions) => {
+      const outputPath = resolve(process.cwd(), cmdOptions.outputPath);
+      const sourcePath = resolve(process.cwd(), cmdOptions.sourcePath);
+
+      if (existsSync(outputPath) && !cmdOptions.force) {
+        console.error(`policy init: file already exists at ${outputPath} (use --force to overwrite)`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!existsSync(sourcePath)) {
+        console.error(`policy init: source template not found at ${sourcePath}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(sourcePath, "utf8"));
+      } catch (error) {
+        console.error(`policy init: invalid JSON in source template ${sourcePath}`);
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        console.error(`policy init: source template must be a JSON object (${sourcePath})`);
+        process.exitCode = 1;
+        return;
+      }
+
+      mkdirSync(dirname(outputPath), { recursive: true });
+      writeFileSync(outputPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+      console.log(`policy init: wrote ${outputPath}`);
+      console.log("Next:");
+      console.log(`- Set PI_TOOL_POLICY_FILE=${outputPath} (optional if using default path)`);
+      console.log(`- Edit allow/deny patterns in ${outputPath}`);
+      console.log(`- Restart worker to apply changes`);
+    });
 
   mcp
     .command("init")
