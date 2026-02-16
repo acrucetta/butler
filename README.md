@@ -109,6 +109,14 @@ PI_MODEL=moonshotai/kimi-k2.5
 # PI_SESSION_ROOT=<repo-root>/.data/worker/sessions
 ```
 
+When `TG_AGENT_MARKDOWNV2=true`, prefer Telegram entities over standard Markdown:
+- bold: `*bold*`
+- italic: `_italic_` (not `*italic*`)
+- underline: `__underline__`
+- strikethrough: `~strike~`
+- inline code: `` `code` ``
+- fenced code blocks: ```` ```lang ... ``` ````
+
 4. Validate setup:
 
 ```bash

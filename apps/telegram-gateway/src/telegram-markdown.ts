@@ -1,6 +1,11 @@
 const CODE_BLOCK_PATTERN = /```([^\n`]*)\n?([\s\S]*?)```/g;
 const INLINE_CODE_PATTERN = /`([^`\n]+?)`/g;
 const LINK_PATTERN = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+const BOLD_ITALIC_PATTERN = /\*\*\*([^*\n][^*\n]*?)\*\*\*/g;
+const BOLD_PATTERN = /\*\*([^*\n][^*\n]*?)\*\*/g;
+const ITALIC_STAR_PATTERN = /(^|[\s(])\*([^*\n][^*\n]*?)\*(?=$|[\s).,!?:;])/g;
+const ITALIC_UNDERSCORE_PATTERN = /(^|[\s(])_([^_\n][^_\n]*?)_(?=$|[\s).,!?:;])/g;
+const UNDERLINE_PATTERN = /__([^_\n][^_\n]*?)__/g;
 const HEADING_PATTERN = /^\s*#{1,6}\s+(.+)$/;
 const BULLET_PATTERN = /^\s*[-*]\s+(.+)$/;
 const ORDERED_LIST_PATTERN = /^\s*(\d+)\.\s+(.+)$/;
@@ -20,6 +25,26 @@ export function toTelegramMarkdownV2(markdown: string): string {
 
   working = working.replace(LINK_PATTERN, (_match, label: string, url: string) =>
     createToken(replacements, renderLink(label, url))
+  );
+
+  working = working.replace(BOLD_ITALIC_PATTERN, (_match, content: string) =>
+    createToken(replacements, renderBoldItalic(content))
+  );
+
+  working = working.replace(BOLD_PATTERN, (_match, content: string) =>
+    createToken(replacements, renderBold(content))
+  );
+
+  working = working.replace(ITALIC_STAR_PATTERN, (_match, prefix: string, content: string) =>
+    `${prefix}${createToken(replacements, renderItalic(content))}`
+  );
+
+  working = working.replace(ITALIC_UNDERSCORE_PATTERN, (_match, prefix: string, content: string) =>
+    `${prefix}${createToken(replacements, renderItalic(content))}`
+  );
+
+  working = working.replace(UNDERLINE_PATTERN, (_match, content: string) =>
+    createToken(replacements, renderUnderline(content))
   );
 
   const escaped = working
@@ -85,6 +110,22 @@ function renderInlineCode(code: string): string {
 
 function renderLink(label: string, url: string): string {
   return `[${escapeMarkdownV2Text(label)}](${escapeMarkdownV2Url(url)})`;
+}
+
+function renderBold(content: string): string {
+  return `*${escapeMarkdownV2Text(content)}*`;
+}
+
+function renderItalic(content: string): string {
+  return `_${escapeMarkdownV2Text(content)}_`;
+}
+
+function renderUnderline(content: string): string {
+  return `__${escapeMarkdownV2Text(content)}__`;
+}
+
+function renderBoldItalic(content: string): string {
+  return `*_${escapeMarkdownV2Text(content)}_*`;
 }
 
 function createToken(replacements: string[], replacement: string): string {

@@ -315,7 +315,9 @@ function defaultMemoryPrompt(): string {
     "- Use memory/YYYY-MM-DD.md for short-lived daily notes.",
     "- If user says to remember something, write it to MEMORY.md or today's memory file.",
     "- Keep memory concise and accurate; do not invent facts.",
-    "- Continue using the session transcript normally, but persist durable facts to files."
+    "- Continue using the session transcript normally, but persist durable facts to files.",
+    "- Telegram formatting note: when using MarkdownV2, use *bold*, _italic_, __underline__, ~strikethrough~, and backticks for code.",
+    "- Do not use single-asterisk italics (*like this*) for Telegram; use underscores (_like this_) for italics."
   ].join("\n");
 }
 
