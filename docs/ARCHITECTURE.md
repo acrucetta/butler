@@ -14,6 +14,7 @@ Related operating docs:
 ```mermaid
 flowchart LR
     TG[Telegram users] -->|messages| GW[telegram-gateway]
+    AUTO[heartbeat/cron/webhooks] -->|trigger jobs| ORCH
 
     subgraph Control_Plane
       GW -->|create/status/approve/abort| ORCH[orchestrator API]
@@ -21,6 +22,8 @@ flowchart LR
     end
 
     subgraph Execution_Plane
+      ROUTER[model router: profiles/routes/cooldowns]
+      ROUTER --> WORKER[vm-worker]
       WORKER[vm-worker] -->|RPC prompt/abort| PI[pi runtime]
     end
 
@@ -54,11 +57,63 @@ flowchart TB
 
 - `telegram-gateway` handles Telegram commands, pairing, role checks, rate limits, and job status updates.
 - `orchestrator` is the source of truth for job state, queueing, event history, and global pause state.
+- `orchestrator` also hosts proactive trigger runtime (heartbeats, cron rules, webhook ingress) and enqueues regular jobs.
 - `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
+- `vm-worker` includes model routing that selects a profile chain (by job kind/metadata) and performs guarded fallback.
 - `pi` runtime is only invoked by `vm-worker`.
 - `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
 - In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
 - `packages/contracts` defines request/response schemas shared by gateway, orchestrator, and worker.
+
+## Capabilities unlocked by proactive runtime
+
+- Scheduled autonomy: recurring checks and routines without waiting for a Telegram message.
+- Event-driven automation: external systems can trigger Butler through authenticated webhooks.
+- Unified execution path: proactive jobs use the same queue, approval model, and worker lifecycle as user jobs.
+- Trigger safety: per-trigger dedupe prevents queue floods while a prior run is still active.
+- Operator visibility: proactive scheduler health and counts are visible via API.
+
+## Proactive trigger flow
+
+```mermaid
+flowchart LR
+    HB[Heartbeat rules] --> PR[Proactive runtime]
+    CRON[Cron rules] --> PR
+    WH[Webhook POST + secret] --> PR
+
+    PR --> DEDUPE{Active job for trigger key?}
+    DEDUPE -->|yes| SKIP[Skip enqueue]
+    DEDUPE -->|no| CREATE[Create normal job in store]
+    CREATE --> QUEUE[(orchestrator queue)]
+    QUEUE --> CLAIM[Worker claim loop]
+    CLAIM --> EXEC[Worker execution]
+```
+
+## Proactive state + control visibility
+
+```mermaid
+flowchart LR
+    OPS[Operator / Gateway] -->|GET /v1/proactive/state| ORCH[orchestrator]
+    EXT[External system] -->|POST /v1/proactive/webhooks/:id| ORCH
+    ORCH -->|401| EXT
+    ORCH -->|404| EXT
+    ORCH -->|202 enqueued| EXT
+```
+
+## Model routing + fallback flow
+
+```mermaid
+flowchart LR
+    JOB[Claimed job] --> ROUTE[Select route by kind or metadata.modelProfile]
+    ROUTE --> TRY1[Attempt profile 1]
+    TRY1 -->|success| DONE[Complete job]
+    TRY1 -->|retryable + no tool/output| TRY2[Attempt next profile]
+    TRY1 -->|non-retryable or partial side effects| FAIL[Fail job]
+    TRY2 -->|success| DONE
+    TRY2 -->|retryable| TRYN[Attempt next profile until maxAttempts]
+    TRYN -->|exhausted| FAIL
+    FAIL --> COOL[Put failing profile on cooldown]
+```
 
 ## Job lifecycle
 
@@ -91,6 +146,7 @@ The code follows the same boundaries shown above:
 - Orchestrator job queue/state machine and JSON persistence: `apps/orchestrator/src/store.ts`
 - Worker claim loop, heartbeat, and completion/failure flow: `apps/vm-worker/src/index.ts`
 - Worker Pi RPC session lifecycle: `apps/vm-worker/src/pi-rpc-session.ts`
+- Worker model routing and fallback runtime: `apps/vm-worker/src/model-routing.ts`
 - Shared schemas/contracts at API boundaries: `packages/contracts/src/index.ts`
 
 ## Security and policy implemented
@@ -118,6 +174,7 @@ The code follows the same boundaries shown above:
 - `GET /v1/admin/state`
 - `POST /v1/admin/pause`
 - `POST /v1/admin/resume`
+- `GET /v1/proactive/state`
 
 ### Worker -> Orchestrator
 
@@ -127,6 +184,10 @@ The code follows the same boundaries shown above:
 - `POST /v1/workers/:jobId/complete`
 - `POST /v1/workers/:jobId/fail`
 - `POST /v1/workers/:jobId/aborted`
+
+### External -> Orchestrator (Proactive webhook ingress)
+
+- `POST /v1/proactive/webhooks/:webhookId`
 
 ## Next extension points
 

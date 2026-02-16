@@ -104,6 +104,8 @@ PI_EXEC_MODE=rpc
 PI_BINARY=pi
 PI_PROVIDER=openrouter
 PI_MODEL=moonshotai/kimi-k2.5
+# optional: OpenClaw-style model profile routing + fallback
+# PI_MODEL_ROUTING_FILE=.data/worker/model-routing.json
 # optional: defaults are set by butler CLI when omitted
 # PI_WORKSPACE=<repo-root>
 # PI_SESSION_ROOT=<repo-root>/.data/worker/sessions
@@ -163,6 +165,42 @@ You can override the injected policy text with:
 
 ```bash
 PI_APPEND_SYSTEM_PROMPT="your custom memory policy"
+```
+
+## OpenClaw-style model routing + fallback
+
+Worker supports profile-based model routing with fallback/cooldown behavior.
+
+- Provide routing config at `PI_MODEL_ROUTING_FILE` (or `.data/worker/model-routing.json` if present).
+- Use `config/model-routing.example.json` as a template.
+- Route chains can differ by job kind (`task` vs `run`).
+- On retryable failures, worker falls back to the next profile in route order.
+- A failed profile is cooled down and deprioritized for subsequent jobs.
+- Fallback is intentionally blocked when an attempt already produced output or tool activity to avoid duplicate side effects.
+- Job metadata can pin a profile with `modelProfile`.
+
+If no routing file exists, worker keeps legacy single-model behavior (`PI_PROVIDER` + `PI_MODEL`).
+
+## Proactive runtime (heartbeats, cron, webhooks)
+
+Orchestrator can proactively enqueue jobs from config-driven triggers.
+
+- Set `ORCH_PROACTIVE_CONFIG_FILE` to a JSON config path (default: `.data/orchestrator/proactive-runtime.json`).
+- Use `config/proactive-runtime.example.json` as a starting template.
+- Trigger types:
+  - `heartbeatRules`: enqueue every `everySeconds`.
+  - `cronRules`: enqueue on 5-field cron matches.
+  - `webhooks`: `POST /v1/proactive/webhooks/:webhookId` with `x-webhook-secret`.
+- Duplicate runs for the same trigger are skipped while a previous trigger job is still non-terminal.
+- Inspect runtime with `GET /v1/proactive/state` (gateway API key required).
+
+Webhook example:
+
+```bash
+curl -X POST "http://127.0.0.1:8787/v1/proactive/webhooks/github-pr-review" \
+  -H "content-type: application/json" \
+  -H "x-webhook-secret: <webhook-secret>" \
+  -d '{"action":"opened","repository":"example/repo"}'
 ```
 
 ## MCP CLI support (mcporter)

@@ -1,0 +1,51 @@
+{
+  "enabled": true,
+  "tickMs": 5000,
+  "heartbeatRules": [
+    {
+      "id": "daily-memory-ping",
+      "everySeconds": 900,
+      "prompt": "Check MEMORY.md and summarize what changed in the last 15 minutes.",
+      "target": {
+        "kind": "task",
+        "chatId": "123456789",
+        "requesterId": "system:heartbeat",
+        "sessionKey": "proactive:memory",
+        "requiresApproval": false,
+        "metadata": {
+          "source": "proactive"
+        }
+      }
+    }
+  ],
+  "cronRules": [
+    {
+      "id": "morning-brief",
+      "cron": "0 9 * * *",
+      "prompt": "Generate the morning brief and top TODOs.",
+      "target": {
+        "kind": "task",
+        "chatId": "123456789",
+        "requesterId": "system:cron",
+        "sessionKey": "proactive:brief",
+        "requiresApproval": false
+      }
+    }
+  ],
+  "webhooks": [
+    {
+      "id": "github-pr-review",
+      "secret": "replace-with-strong-secret-32-chars",
+      "prompt": "Review this webhook event and suggest next actions.",
+      "includePayloadInPrompt": true,
+      "target": {
+        "kind": "run",
+        "chatId": "123456789",
+        "requesterId": "system:webhook",
+        "sessionKey": "proactive:webhook",
+        "requiresApproval": true
+      }
+    }
+  ],
+  "webhookPayloadMaxChars": 8000
+}

@@ -2,8 +2,8 @@ import { hostname } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
+import { ModelRoutingRuntime } from "./model-routing.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
-import { PiRpcSessionPool } from "./pi-rpc-session.js";
 
 const orchestratorBaseUrl = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8787";
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
@@ -17,6 +17,8 @@ const piModel = process.env.PI_MODEL;
 const piCwd = resolve(process.env.PI_WORKSPACE ?? ".data/worker/workspace");
 const piSessionRoot = resolve(process.env.PI_SESSION_ROOT ?? ".data/worker/sessions");
 const piAppendSystemPrompt = process.env.PI_APPEND_SYSTEM_PROMPT ?? defaultMemoryPrompt();
+const modelRoutingConfigFile = resolve(process.env.PI_MODEL_ROUTING_FILE ?? ".data/worker/model-routing.json");
+const modelRoutingConfigRequired = Boolean(process.env.PI_MODEL_ROUTING_FILE);
 const mcpCliBinDir = resolve(process.env.BUTLER_MCP_BIN_DIR ?? ".data/mcp/bin");
 
 mkdirSync(piCwd, { recursive: true });
@@ -26,13 +28,16 @@ bootstrapWorkspaceMemory(piCwd);
 process.env.PATH = prependPathEntry(mcpCliBinDir, process.env.PATH);
 
 const orchestrator = new OrchestratorClient(orchestratorBaseUrl, workerToken);
-const sessionPool = new PiRpcSessionPool({
+const modelRouting = new ModelRoutingRuntime({
   piBinary,
   cwd: piCwd,
   sessionRoot: piSessionRoot,
-  provider: piProvider,
-  model: piModel,
-  appendSystemPrompt: piAppendSystemPrompt
+  appendSystemPrompt: piAppendSystemPrompt,
+  defaultProvider: piProvider,
+  defaultModel: piModel,
+  configFilePath: modelRoutingConfigFile,
+  requireConfigFile: modelRoutingConfigRequired,
+  logger: console
 });
 
 let shuttingDown = false;
@@ -51,6 +56,7 @@ async function run(): Promise<void> {
     console.log(`[worker] rpc mode enabled with PI_BINARY=${piBinary}`);
     console.log(`[worker] rpc workspace=${piCwd}`);
     console.log(`[worker] rpc sessions=${piSessionRoot}`);
+    console.log(`[worker] model routing config=${modelRoutingConfigFile} source=${modelRouting.getSourceLabel()}`);
   }
 
   while (!shuttingDown) {
@@ -68,7 +74,7 @@ async function run(): Promise<void> {
     }
   }
 
-  await sessionPool.shutdown();
+  await modelRouting.shutdown();
   console.log("[worker] shutdown complete");
 }
 
@@ -81,9 +87,8 @@ async function runJob(job: Job): Promise<void> {
     return;
   }
 
-  const session = sessionPool.getSession(job.sessionKey);
-
   let abortRequested = false;
+  let activeSession: { abort: () => Promise<void> } | null = null;
   let heartbeatActive = false;
   const heartbeatTimer = setInterval(() => {
     if (heartbeatActive) {
@@ -97,7 +102,9 @@ async function runJob(job: Job): Promise<void> {
         if (shouldAbort && !abortRequested) {
           abortRequested = true;
           await postEvent(job.id, "log", "Abort requested by orchestrator");
-          await session.abort();
+          if (activeSession) {
+            await activeSession.abort();
+          }
         }
       } catch (error) {
         console.error(`[worker] heartbeat error job=${job.id}: ${formatError(error)}`);
@@ -132,23 +139,86 @@ async function runJob(job: Job): Promise<void> {
 
   try {
     const preparedPrompt = buildPromptWithWorkspaceContext(job.prompt, piCwd);
-    const result = await session.prompt(preparedPrompt, {
-      onTextDelta(delta) {
-        fullText += delta;
-        deltaBuffer += delta;
-      },
-      onToolStart(toolName) {
-        void postEvent(job.id, "tool_start", `Tool started: ${toolName}`, { toolName });
-      },
-      onToolEnd(toolName) {
-        void postEvent(job.id, "tool_end", `Tool finished: ${toolName}`, { toolName });
-      },
-      onLog(message) {
-        void postEvent(job.id, "log", message);
-      }
-    });
+    const plan = modelRouting.buildPlan(job);
+    await postEvent(
+      job.id,
+      "log",
+      `Model route: ${plan.profiles.map((profile) => profile.id).join(" -> ")} (maxAttempts=${plan.maxAttempts})`
+    );
 
-    await flushDelta();
+    let finalResult = "";
+    let completed = false;
+
+    for (let attempt = 0; attempt < plan.maxAttempts; attempt += 1) {
+      const profile = plan.profiles[attempt];
+      if (!profile) {
+        break;
+      }
+
+      let attemptHadOutput = false;
+      let attemptHadToolActivity = false;
+
+      await postEvent(
+        job.id,
+        "log",
+        `Model attempt ${attempt + 1}/${plan.maxAttempts}: ${profile.id} (${profile.provider ?? "default"}/${profile.model ?? "default"})`
+      );
+
+      const session = modelRouting.getSession(profile.id, job.sessionKey);
+      activeSession = session;
+
+      try {
+        const result = await session.prompt(preparedPrompt, {
+          onTextDelta(delta) {
+            attemptHadOutput = true;
+            fullText += delta;
+            deltaBuffer += delta;
+          },
+          onToolStart(toolName) {
+            attemptHadToolActivity = true;
+            void postEvent(job.id, "tool_start", `Tool started: ${toolName}`, { toolName });
+          },
+          onToolEnd(toolName) {
+            attemptHadToolActivity = true;
+            void postEvent(job.id, "tool_end", `Tool finished: ${toolName}`, { toolName });
+          },
+          onLog(message) {
+            void postEvent(job.id, "log", message);
+          }
+        });
+
+        modelRouting.markSuccess(profile.id);
+        await flushDelta();
+        finalResult = result.trim().length > 0 ? result : fullText;
+        completed = true;
+        break;
+      } catch (error) {
+        const message = formatError(error);
+        const evaluation = modelRouting.evaluateFallback(profile.id, {
+          abortRequested,
+          attemptHadOutput,
+          attemptHadToolActivity,
+          errorMessage: message
+        });
+
+        await postEvent(
+          job.id,
+          "log",
+          `Model attempt failed profile=${profile.id} fallback=${String(evaluation.fallback)} reason=${evaluation.reason}: ${message}`
+        );
+
+        const hasNextAttempt = attempt + 1 < plan.maxAttempts;
+        if (!evaluation.fallback || !hasNextAttempt) {
+          throw error;
+        }
+      } finally {
+        activeSession = null;
+      }
+    }
+
+    if (!completed) {
+      throw new Error("Model route exhausted without successful completion");
+    }
 
     if (abortRequested) {
       await orchestrator.aborted(job.id, "Abort requested by user");
@@ -156,7 +226,6 @@ async function runJob(job: Job): Promise<void> {
       return;
     }
 
-    const finalResult = result.trim().length > 0 ? result : fullText;
     await orchestrator.complete(job.id, finalResult);
     console.log(`[worker] job complete job=${job.id}`);
   } catch (error) {

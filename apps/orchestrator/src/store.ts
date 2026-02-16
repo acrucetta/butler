@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Job, JobCreateRequest, JobEvent, JobStatus } from "@pi-self/contracts";
+import { isTerminalStatus, type Job, type JobCreateRequest, type JobEvent, type JobStatus } from "@pi-self/contracts";
 
 interface PersistedState {
   jobs: Record<string, Job>;
@@ -255,6 +255,20 @@ export class OrchestratorStore {
 
     this.save();
     return structuredClone(job);
+  }
+
+  hasActiveJobByMetadata(key: string, value: string): boolean {
+    for (const job of Object.values(this.state.jobs)) {
+      if (isTerminalStatus(job.status)) {
+        continue;
+      }
+
+      if (job.metadata?.[key] === value) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   getAdminState(): { paused: boolean; pauseReason?: string; updatedAt: string } {

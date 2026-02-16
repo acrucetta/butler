@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   AdminStateSchema,
@@ -13,16 +13,22 @@ import {
 } from "@pi-self/contracts";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
+import { ProactiveRuntime } from "./proactive-runtime.js";
 import { OrchestratorStore } from "./store.js";
 
 const port = Number(process.env.ORCH_PORT ?? "8787");
 const host = process.env.ORCH_HOST ?? "127.0.0.1";
 const statePath = resolve(process.env.ORCH_STATE_FILE ?? ".data/orchestrator/state.json");
+const proactiveConfigPath = resolve(
+  process.env.ORCH_PROACTIVE_CONFIG_FILE ?? ".data/orchestrator/proactive-runtime.json"
+);
 const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWAY_TOKEN);
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
 
 mkdirSync(dirname(statePath), { recursive: true });
 const store = new OrchestratorStore(statePath);
+const proactive = new ProactiveRuntime(store, loadProactiveConfig(proactiveConfigPath));
+proactive.start();
 const app = express();
 
 app.use(express.json({ limit: "1mb" }));
@@ -89,6 +95,10 @@ app.post("/v1/jobs/:jobId/abort", requireApiKey(gatewayToken), (req, res) => {
 
 app.get("/v1/admin/state", requireApiKey(gatewayToken), (_req, res) => {
   res.json({ admin: AdminStateSchema.parse(store.getAdminState()) });
+});
+
+app.get("/v1/proactive/state", requireApiKey(gatewayToken), (_req, res) => {
+  res.json({ proactive: proactive.getState() });
 });
 
 app.post("/v1/admin/pause", requireApiKey(gatewayToken), (req, res, next) => {
@@ -177,6 +187,28 @@ app.post("/v1/workers/:jobId/aborted", requireApiKey(workerToken), (req, res, ne
   }
 });
 
+app.post("/v1/proactive/webhooks/:webhookId", (req, res) => {
+  const providedSecret = req.header("x-webhook-secret");
+  const result = proactive.triggerWebhook(req.params.webhookId, providedSecret, req.body);
+
+  if (result.status === "not_found") {
+    res.status(404).json({ error: "webhook_not_found" });
+    return;
+  }
+
+  if (result.status === "unauthorized") {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+
+  if (result.status === "duplicate_active_job") {
+    res.status(202).json({ ok: true, status: result.status, jobId: null });
+    return;
+  }
+
+  res.status(202).json({ ok: true, status: result.status, jobId: result.jobId ?? null });
+});
+
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (error instanceof z.ZodError) {
     res.status(400).json({ error: "invalid_request", details: error.flatten() });
@@ -190,7 +222,14 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 app.listen(port, host, () => {
   console.log(`[orchestrator] listening on ${host}:${port}`);
   console.log(`[orchestrator] state file: ${statePath}`);
+  console.log(`[orchestrator] proactive config: ${proactiveConfigPath}`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    proactive.stop();
+  });
+}
 
 function requireApiKey(expected: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -218,4 +257,13 @@ function requireSecret(name: string, value: string | undefined): string {
   }
 
   return value;
+}
+
+function loadProactiveConfig(filePath: string): unknown {
+  if (!existsSync(filePath)) {
+    return {};
+  }
+
+  const raw = readFileSync(filePath, "utf8");
+  return JSON.parse(raw);
 }
