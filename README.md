@@ -116,6 +116,8 @@ When `TG_AGENT_MARKDOWNV2=true`, prefer Telegram entities over standard Markdown
 - strikethrough: `~strike~`
 - inline code: `` `code` ``
 - fenced code blocks: ```` ```lang ... ``` ````
+- blockquote: lines starting with `>`
+- tables and horizontal rules are not native Telegram MarkdownV2 entities; the gateway falls back to a readable text/code-block rendering
 
 4. Validate setup:
 

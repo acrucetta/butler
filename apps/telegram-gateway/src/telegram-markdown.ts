@@ -6,14 +6,20 @@ const BOLD_PATTERN = /\*\*([^*\n][^*\n]*?)\*\*/g;
 const ITALIC_STAR_PATTERN = /(^|[\s(])\*([^*\n][^*\n]*?)\*(?=$|[\s).,!?:;])/g;
 const ITALIC_UNDERSCORE_PATTERN = /(^|[\s(])_([^_\n][^_\n]*?)_(?=$|[\s).,!?:;])/g;
 const UNDERLINE_PATTERN = /__([^_\n][^_\n]*?)__/g;
+const STRIKETHROUGH_DOUBLE_PATTERN = /~~([^~\n][^~\n]*?)~~/g;
+const STRIKETHROUGH_SINGLE_PATTERN = /(^|[\s(])~([^~\n][^~\n]*?)~(?=$|[\s).,!?:;])/g;
 const HEADING_PATTERN = /^\s*#{1,6}\s+(.+)$/;
 const BULLET_PATTERN = /^\s*[-*]\s+(.+)$/;
 const ORDERED_LIST_PATTERN = /^\s*(\d+)\.\s+(.+)$/;
+const BLOCKQUOTE_PATTERN = /^\s*>\s?(.*)$/;
+const HORIZONTAL_RULE_PATTERN = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const MARKDOWN_V2_ESCAPE_PATTERN = /[_*[\]()~`>#+\-=|{}.!]/g;
 
 export function toTelegramMarkdownV2(markdown: string): string {
   const replacements: string[] = [];
   let working = markdown.replace(/\r\n?/g, "\n");
+
+  working = replaceMarkdownTables(working, replacements);
 
   working = working.replace(CODE_BLOCK_PATTERN, (_match, language: string, code: string) =>
     createToken(replacements, renderCodeBlock(language, code))
@@ -47,6 +53,14 @@ export function toTelegramMarkdownV2(markdown: string): string {
     createToken(replacements, renderUnderline(content))
   );
 
+  working = working.replace(STRIKETHROUGH_DOUBLE_PATTERN, (_match, content: string) =>
+    createToken(replacements, renderStrikethrough(content))
+  );
+
+  working = working.replace(STRIKETHROUGH_SINGLE_PATTERN, (_match, prefix: string, content: string) =>
+    `${prefix}${createToken(replacements, renderStrikethrough(content))}`
+  );
+
   const escaped = working
     .split("\n")
     .map((line) => renderLine(line))
@@ -69,6 +83,15 @@ function renderLine(line: string): string {
   const orderedMatch = line.match(ORDERED_LIST_PATTERN);
   if (orderedMatch) {
     return `${orderedMatch[1]}\\. ${escapeMarkdownV2Text(orderedMatch[2] ?? "")}`;
+  }
+
+  const blockquoteMatch = line.match(BLOCKQUOTE_PATTERN);
+  if (blockquoteMatch) {
+    return `> ${escapeMarkdownV2Text(blockquoteMatch[1] ?? "")}`;
+  }
+
+  if (HORIZONTAL_RULE_PATTERN.test(line)) {
+    return escapeMarkdownV2Text("----------");
   }
 
   return escapeMarkdownV2Text(line);
@@ -126,6 +149,98 @@ function renderUnderline(content: string): string {
 
 function renderBoldItalic(content: string): string {
   return `*_${escapeMarkdownV2Text(content)}_*`;
+}
+
+function renderStrikethrough(content: string): string {
+  return `~${escapeMarkdownV2Text(content)}~`;
+}
+
+function replaceMarkdownTables(value: string, replacements: string[]): string {
+  const lines = value.split("\n");
+  const output: string[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    if (isTableHeader(lines[index]) && isTableSeparator(lines[index + 1])) {
+      const tableLines: string[] = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length && isTableRow(lines[index])) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      output.push(createToken(replacements, renderTableAsCodeBlock(tableLines)));
+      continue;
+    }
+
+    output.push(lines[index] ?? "");
+    index += 1;
+  }
+
+  return output.join("\n");
+}
+
+function isTableHeader(line: string | undefined): boolean {
+  if (!line) {
+    return false;
+  }
+  return /^\s*\|?[^|\n]+(\|[^|\n]+)+\|?\s*$/.test(line);
+}
+
+function isTableSeparator(line: string | undefined): boolean {
+  if (!line) {
+    return false;
+  }
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function isTableRow(line: string | undefined): boolean {
+  if (!line) {
+    return false;
+  }
+  return /^\s*\|?[^|\n]+(\|[^|\n]+)+\|?\s*$/.test(line);
+}
+
+function renderTableAsCodeBlock(tableLines: string[]): string {
+  const rows = tableLines
+    .filter((_line, rowIndex) => rowIndex !== 1)
+    .map((line) => splitTableCells(line));
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  const widths = new Array<number>(columnCount).fill(0);
+
+  for (const row of rows) {
+    for (let column = 0; column < columnCount; column += 1) {
+      const cell = row[column] ?? "";
+      widths[column] = Math.max(widths[column] ?? 0, cell.length);
+    }
+  }
+
+  const renderedRows = rows.map((row, rowIndex) => {
+    const cells = new Array<string>(columnCount).fill("");
+    for (let column = 0; column < columnCount; column += 1) {
+      const cell = row[column] ?? "";
+      cells[column] = cell.padEnd(widths[column] ?? cell.length, " ");
+    }
+
+    const rendered = `| ${cells.join(" | ")} |`;
+    if (rowIndex === 0) {
+      const divider = `|-${widths.map((width) => "-".repeat(Math.max(width, 1))).join("-|-")}-|`;
+      return `${rendered}\n${divider}`;
+    }
+    return rendered;
+  });
+
+  return renderCodeBlock("", renderedRows.join("\n"));
+}
+
+function splitTableCells(line: string): string[] {
+  let working = line.trim();
+  if (working.startsWith("|")) {
+    working = working.slice(1);
+  }
+  if (working.endsWith("|")) {
+    working = working.slice(0, -1);
+  }
+  return working.split("|").map((cell) => cell.trim());
 }
 
 function createToken(replacements: string[], replacement: string): string {

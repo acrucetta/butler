@@ -26,3 +26,24 @@ test("preserves links and code while escaping plain text", () => {
     "Use `npm run build` and [docs](https://example.com/path) now\\."
   );
 });
+
+test("supports strikethrough from markdown and telegram syntax", () => {
+  assert.equal(toTelegramMarkdownV2("~~deprecated~~"), "~deprecated~");
+  assert.equal(toTelegramMarkdownV2("~deprecated~"), "~deprecated~");
+});
+
+test("renders markdown blockquotes as Telegram blockquotes", () => {
+  assert.equal(toTelegramMarkdownV2("> note"), "> note");
+  assert.equal(toTelegramMarkdownV2("> keep *this*"), "> keep _this_");
+});
+
+test("renders horizontal rules as separator text fallback", () => {
+  assert.equal(toTelegramMarkdownV2("---"), "\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-");
+});
+
+test("renders markdown tables as code block fallback", () => {
+  assert.equal(
+    toTelegramMarkdownV2("| Name | Role |\n| --- | --- |\n| Bolt | Agent |"),
+    "```\n| Name | Role  |\n|------|-------|\n| Bolt | Agent |\n```"
+  );
+});

@@ -317,7 +317,8 @@ function defaultMemoryPrompt(): string {
     "- Keep memory concise and accurate; do not invent facts.",
     "- Continue using the session transcript normally, but persist durable facts to files.",
     "- Telegram formatting note: when using MarkdownV2, use *bold*, _italic_, __underline__, ~strikethrough~, and backticks for code.",
-    "- Do not use single-asterisk italics (*like this*) for Telegram; use underscores (_like this_) for italics."
+    "- Do not use single-asterisk italics (*like this*) for Telegram; use underscores (_like this_) for italics.",
+    "- Telegram MarkdownV2 does not support native tables or horizontal rules; prefer compact lists, or render tables as fenced code blocks."
   ].join("\n");
 }
 
