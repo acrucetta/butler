@@ -248,6 +248,15 @@ Orchestrator can proactively enqueue jobs from config-driven triggers.
     - `cron.list|cron.add|cron.update|cron.remove|cron.run`
     - `heartbeat.list|heartbeat.add|heartbeat.update|heartbeat.remove|heartbeat.run`
     - `proactive.runs`
+    - `memory.search|memory.store|memory.ledger`
+
+Memory tool notes:
+- `memory.search` uses relevance ranking across `memory/YYYY-MM-DD.md` and `MEMORY.md` (recency is a tie-breaker).
+- `memory.store` supports `scope=daily|durable`.
+- `memory.ledger` reads recent writes from `.data/orchestrator/memory-ledger.jsonl` by default.
+- Optional env overrides:
+  - `ORCH_MEMORY_ROOT` (default: repo root)
+  - `ORCH_MEMORY_LEDGER_FILE` (default: `.data/orchestrator/memory-ledger.jsonl`)
 
 Webhook example:
 

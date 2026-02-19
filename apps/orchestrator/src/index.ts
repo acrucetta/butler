@@ -15,6 +15,7 @@ import {
 } from "@pi-self/contracts";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
+import { MemoryService } from "./memory-service.js";
 import { ProactiveRuntime } from "./proactive-runtime.js";
 import { OrchestratorStore } from "./store.js";
 
@@ -24,12 +25,16 @@ const statePath = resolve(process.env.ORCH_STATE_FILE ?? ".data/orchestrator/sta
 const proactiveConfigPath = resolve(
   process.env.ORCH_PROACTIVE_CONFIG_FILE ?? ".data/orchestrator/proactive-runtime.json"
 );
+const memoryRoot = resolve(process.env.ORCH_MEMORY_ROOT ?? process.cwd());
+const memoryLedgerPath = resolve(process.env.ORCH_MEMORY_LEDGER_FILE ?? ".data/orchestrator/memory-ledger.jsonl");
 const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWAY_TOKEN);
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
 
 mkdirSync(dirname(statePath), { recursive: true });
 mkdirSync(dirname(proactiveConfigPath), { recursive: true });
+mkdirSync(dirname(memoryLedgerPath), { recursive: true });
 const store = new OrchestratorStore(statePath);
+const memory = new MemoryService(memoryRoot, memoryLedgerPath);
 const proactive = new ProactiveRuntime(
   store,
   loadProactiveConfig(proactiveConfigPath),
@@ -313,7 +318,10 @@ app.get("/v1/tools", requireApiKey(gatewayToken), (_req, res) => {
       { name: "heartbeat.update", description: "Update a proactive heartbeat rule." },
       { name: "heartbeat.remove", description: "Delete a proactive heartbeat rule by id." },
       { name: "heartbeat.run", description: "Trigger an existing proactive heartbeat rule immediately." },
-      { name: "proactive.runs", description: "List recent proactive run ledger entries." }
+      { name: "proactive.runs", description: "List recent proactive run ledger entries." },
+      { name: "memory.search", description: "Search memory files using relevance ranking across daily + durable memory." },
+      { name: "memory.store", description: "Store a memory entry in daily or durable scope." },
+      { name: "memory.ledger", description: "List recent memory write ledger entries." }
     ]
   });
 });
@@ -400,6 +408,33 @@ app.post("/v1/tools/invoke", requireApiKey(gatewayToken), (req, res, next) => {
       }).parse(args);
       const runs = store.listProactiveRuns(body.limit, body.triggerKey);
       res.json({ ok: true, result: { runs } });
+      return;
+    }
+
+    if (parsed.tool === "memory.search") {
+      const body = z.object({
+        query: z.string().min(1).max(500),
+        limit: z.number().int().min(1).max(50).default(10)
+      }).parse(args);
+      const hits = memory.search(body.query, body.limit);
+      res.json({ ok: true, result: { hits } });
+      return;
+    }
+
+    if (parsed.tool === "memory.store") {
+      const body = z.object({
+        text: z.string().min(1).max(2_000),
+        scope: z.enum(["daily", "durable"]).default("daily")
+      }).parse(args);
+      const stored = memory.store(body.text, body.scope);
+      res.json({ ok: true, result: stored });
+      return;
+    }
+
+    if (parsed.tool === "memory.ledger") {
+      const body = z.object({ limit: z.number().int().min(1).max(200).default(50) }).parse(args);
+      const entries = memory.ledger(body.limit);
+      res.json({ ok: true, result: { entries } });
       return;
     }
 
