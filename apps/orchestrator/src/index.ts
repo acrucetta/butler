@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   AdminStateSchema,
@@ -6,6 +6,8 @@ import {
   JobCreateRequestSchema,
   JobEventsResponseSchema,
   JobSchema,
+  ProactiveCronRuleSchema,
+  ProactiveHeartbeatRuleSchema,
   WorkerCompleteRequestSchema,
   WorkerEventRequestSchema,
   WorkerFailRequestSchema,
@@ -26,8 +28,13 @@ const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWA
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
 
 mkdirSync(dirname(statePath), { recursive: true });
+mkdirSync(dirname(proactiveConfigPath), { recursive: true });
 const store = new OrchestratorStore(statePath);
-const proactive = new ProactiveRuntime(store, loadProactiveConfig(proactiveConfigPath));
+const proactive = new ProactiveRuntime(
+  store,
+  loadProactiveConfig(proactiveConfigPath),
+  { onConfigChange: (nextConfig) => persistProactiveConfig(proactiveConfigPath, nextConfig) }
+);
 proactive.start();
 const app = express();
 
@@ -99,6 +106,80 @@ app.get("/v1/admin/state", requireApiKey(gatewayToken), (_req, res) => {
 
 app.get("/v1/proactive/state", requireApiKey(gatewayToken), (_req, res) => {
   res.json({ proactive: proactive.getState() });
+});
+
+app.get("/v1/proactive/config", requireApiKey(gatewayToken), (_req, res) => {
+  res.json({ config: proactive.getConfigSummary() });
+});
+
+app.get("/v1/proactive/runs", requireApiKey(gatewayToken), (req, res) => {
+  const limitRaw = Number(req.query.limit ?? "50");
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 50;
+  const triggerKey = typeof req.query.triggerKey === "string" ? req.query.triggerKey : undefined;
+  const runs = store.listProactiveRuns(limit, triggerKey);
+  res.json({ runs });
+});
+
+app.post("/v1/proactive/rules/heartbeat", requireApiKey(gatewayToken), (req, res, next) => {
+  try {
+    const parsed = ProactiveHeartbeatRuleSchema.parse(req.body);
+    const rule = proactive.upsertHeartbeatRule(parsed);
+    res.json({ rule });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/v1/proactive/rules/heartbeat/:id", requireApiKey(gatewayToken), (req, res) => {
+  const removed = proactive.deleteHeartbeatRule(req.params.id);
+  if (!removed) {
+    res.status(404).json({ error: "rule_not_found" });
+    return;
+  }
+
+  res.json({ ok: true });
+});
+
+app.post("/v1/proactive/rules/cron", requireApiKey(gatewayToken), (req, res, next) => {
+  try {
+    const parsed = ProactiveCronRuleSchema.parse(req.body);
+    const rule = proactive.upsertCronRule(parsed);
+    res.json({ rule });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/v1/proactive/rules/cron/:id", requireApiKey(gatewayToken), (req, res) => {
+  const removed = proactive.deleteCronRule(req.params.id);
+  if (!removed) {
+    res.status(404).json({ error: "rule_not_found" });
+    return;
+  }
+
+  res.json({ ok: true });
+});
+
+app.get("/v1/proactive/deliveries/pending", requireApiKey(gatewayToken), (req, res) => {
+  const limitRaw = Number(req.query.limit ?? "20");
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.floor(limitRaw))) : 20;
+  const jobs = store.listPendingProactiveDeliveries(limit);
+  res.json({ jobs });
+});
+
+app.post("/v1/proactive/deliveries/:jobId/ack", requireApiKey(gatewayToken), (req, res, next) => {
+  try {
+    const body = z.object({ receipt: z.string().min(1).max(2_000) }).parse(req.body ?? {});
+    const job = store.markProactiveDelivery(req.params.jobId, body.receipt);
+    if (!job) {
+      res.status(404).json({ error: "job_not_found" });
+      return;
+    }
+
+    res.json({ job });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/v1/admin/pause", requireApiKey(gatewayToken), (req, res, next) => {
@@ -206,7 +287,126 @@ app.post("/v1/proactive/webhooks/:webhookId", (req, res) => {
     return;
   }
 
+  if (result.status === "backoff_blocked") {
+    res.status(202).json({ ok: true, status: result.status, jobId: null });
+    return;
+  }
+
   res.status(202).json({ ok: true, status: result.status, jobId: result.jobId ?? null });
+});
+
+const ToolsInvokeRequestSchema = z.object({
+  tool: z.string().min(1).max(120),
+  arguments: z.record(z.unknown()).default({})
+});
+
+app.get("/v1/tools", requireApiKey(gatewayToken), (_req, res) => {
+  res.json({
+    tools: [
+      { name: "cron.list", description: "List proactive cron rules." },
+      { name: "cron.add", description: "Create a proactive cron rule (supports cron|at|everySeconds)." },
+      { name: "cron.update", description: "Update a proactive cron rule (supports cron|at|everySeconds)." },
+      { name: "cron.remove", description: "Delete a proactive cron rule by id." },
+      { name: "cron.run", description: "Trigger an existing proactive cron rule immediately." },
+      { name: "heartbeat.list", description: "List proactive heartbeat rules." },
+      { name: "heartbeat.add", description: "Create a proactive heartbeat rule." },
+      { name: "heartbeat.update", description: "Update a proactive heartbeat rule." },
+      { name: "heartbeat.remove", description: "Delete a proactive heartbeat rule by id." },
+      { name: "heartbeat.run", description: "Trigger an existing proactive heartbeat rule immediately." },
+      { name: "proactive.runs", description: "List recent proactive run ledger entries." }
+    ]
+  });
+});
+
+app.post("/v1/tools/invoke", requireApiKey(gatewayToken), (req, res, next) => {
+  try {
+    const parsed = ToolsInvokeRequestSchema.parse(req.body ?? {});
+    const args = parsed.arguments;
+
+    if (parsed.tool === "cron.list") {
+      const config = proactive.getConfigSummary();
+      res.json({ ok: true, result: { rules: config.cronRules } });
+      return;
+    }
+
+    if (parsed.tool === "cron.add" || parsed.tool === "cron.update") {
+      const rule = ProactiveCronRuleSchema.parse(args);
+      const created = proactive.upsertCronRule(rule);
+      res.json({ ok: true, result: { rule: created } });
+      return;
+    }
+
+    if (parsed.tool === "cron.remove") {
+      const body = z.object({ id: z.string().min(1).max(120) }).parse(args);
+      const removed = proactive.deleteCronRule(body.id);
+      if (!removed) {
+        res.status(404).json({ error: "rule_not_found" });
+        return;
+      }
+      res.json({ ok: true, result: { removed: true } });
+      return;
+    }
+
+    if (parsed.tool === "cron.run") {
+      const body = z.object({ id: z.string().min(1).max(120) }).parse(args);
+      const result = proactive.triggerCronNow(body.id);
+      if (result.status === "not_found") {
+        res.status(404).json({ error: "rule_not_found" });
+        return;
+      }
+      res.status(202).json({ ok: true, result });
+      return;
+    }
+
+    if (parsed.tool === "heartbeat.list") {
+      const config = proactive.getConfigSummary();
+      res.json({ ok: true, result: { rules: config.heartbeatRules } });
+      return;
+    }
+
+    if (parsed.tool === "heartbeat.add" || parsed.tool === "heartbeat.update") {
+      const rule = ProactiveHeartbeatRuleSchema.parse(args);
+      const created = proactive.upsertHeartbeatRule(rule);
+      res.json({ ok: true, result: { rule: created } });
+      return;
+    }
+
+    if (parsed.tool === "heartbeat.remove") {
+      const body = z.object({ id: z.string().min(1).max(120) }).parse(args);
+      const removed = proactive.deleteHeartbeatRule(body.id);
+      if (!removed) {
+        res.status(404).json({ error: "rule_not_found" });
+        return;
+      }
+      res.json({ ok: true, result: { removed: true } });
+      return;
+    }
+
+    if (parsed.tool === "heartbeat.run") {
+      const body = z.object({ id: z.string().min(1).max(120) }).parse(args);
+      const result = proactive.triggerHeartbeatNow(body.id);
+      if (result.status === "not_found") {
+        res.status(404).json({ error: "rule_not_found" });
+        return;
+      }
+      res.status(202).json({ ok: true, result });
+      return;
+    }
+
+    if (parsed.tool === "proactive.runs") {
+      const body = z.object({
+        limit: z.number().int().min(1).max(200).default(50),
+        triggerKey: z.string().min(1).max(240).optional()
+      }).parse(args);
+      const runs = store.listProactiveRuns(body.limit, body.triggerKey);
+      res.json({ ok: true, result: { runs } });
+      return;
+    }
+
+    res.status(400).json({ error: "unknown_tool", tool: parsed.tool });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -266,4 +466,9 @@ function loadProactiveConfig(filePath: string): unknown {
 
   const raw = readFileSync(filePath, "utf8");
   return JSON.parse(raw);
+}
+
+function persistProactiveConfig(filePath: string, config: unknown): void {
+  const payload = JSON.stringify(config, null, 2);
+  writeFileSync(filePath, `${payload}\n`, "utf8");
 }

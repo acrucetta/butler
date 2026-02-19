@@ -49,6 +49,7 @@ const allowRequesterAbort = parseBoolean(process.env.TG_ALLOW_REQUESTER_ABORT, t
 const notifyToolEvents = parseBoolean(process.env.TG_NOTIFY_TOOL_EVENTS, false);
 const onlyAgentOutput = parseBoolean(process.env.TG_ONLY_AGENT_OUTPUT, true);
 const agentMarkdownV2 = parseBoolean(process.env.TG_AGENT_MARKDOWNV2, true);
+const proactiveDeliveryPollMs = parsePositiveInt(process.env.TG_PROACTIVE_DELIVERY_POLL_MS, 3_000);
 const owners = splitCsv(process.env.TG_OWNER_IDS ?? "");
 const allowFrom = splitCsv(process.env.TG_ALLOW_FROM ?? "");
 const pairingsFile = process.env.TG_PAIRINGS_FILE ?? ".data/gateway/pairings.json";
@@ -260,6 +261,8 @@ await bot.start({
     console.log(`[gateway] owners=${owners.join(",")}`);
   }
 });
+
+void runProactiveDeliveryLoop();
 
 async function handleUnpairedMessage(ctx: any, fromId: string): Promise<void> {
   if (ctx.chat.type !== "private") {
@@ -646,6 +649,74 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => {
     setTimeout(resolvePromise, ms);
   });
+}
+
+async function runProactiveDeliveryLoop(): Promise<void> {
+  for (;;) {
+    try {
+      const jobs = await orchestrator.listPendingProactiveDeliveries(20);
+      if (jobs.length === 0) {
+        await sleep(proactiveDeliveryPollMs);
+        continue;
+      }
+
+      for (const job of jobs) {
+        try {
+          const receipt = await deliverProactiveJob(job);
+          await orchestrator.ackProactiveDelivery(job.id, receipt);
+        } catch (error) {
+          console.warn(`[gateway] proactive delivery failed job=${job.id}: ${formatError(error)}`);
+        }
+      }
+    } catch (error) {
+      console.warn(`[gateway] proactive delivery loop error: ${formatError(error)}`);
+      await sleep(proactiveDeliveryPollMs);
+    }
+  }
+}
+
+async function deliverProactiveJob(job: Job): Promise<string> {
+  const mode = job.metadata?.proactiveDeliveryMode ?? "announce";
+  if (mode === "none") {
+    return `none:${new Date().toISOString()}`;
+  }
+
+  if (mode === "announce") {
+    await sendTerminalJobMessage(job.chatId, job.threadId, job);
+    return `announce:${new Date().toISOString()}`;
+  }
+
+  if (mode === "webhook") {
+    const url = job.metadata?.proactiveDeliveryWebhookUrl;
+    if (!url) {
+      throw new Error("missing proactiveDeliveryWebhookUrl");
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jobId: job.id,
+        status: job.status,
+        resultText: job.resultText ?? "",
+        error: job.error ?? "",
+        finishedAt: job.finishedAt ?? null,
+        trigger: {
+          kind: job.metadata?.proactiveTriggerKind ?? null,
+          id: job.metadata?.proactiveTriggerId ?? null
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`webhook delivery failed (${response.status}): ${text}`);
+    }
+
+    return `webhook:${new Date().toISOString()}`;
+  }
+
+  throw new Error(`unsupported proactive delivery mode '${mode}'`);
 }
 
 function formatError(error: unknown): string {

@@ -178,6 +178,16 @@ The code follows the same boundaries shown above:
 - `POST /v1/admin/pause`
 - `POST /v1/admin/resume`
 - `GET /v1/proactive/state`
+- `GET /v1/proactive/config`
+- `GET /v1/proactive/runs`
+- `POST /v1/proactive/rules/heartbeat`
+- `DELETE /v1/proactive/rules/heartbeat/:id`
+- `POST /v1/proactive/rules/cron`
+- `DELETE /v1/proactive/rules/cron/:id`
+- `GET /v1/proactive/deliveries/pending`
+- `POST /v1/proactive/deliveries/:jobId/ack`
+- `GET /v1/tools`
+- `POST /v1/tools/invoke`
 
 ### Worker -> Orchestrator
 

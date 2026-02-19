@@ -116,6 +116,100 @@ export const AdminStateSchema = z.object({
 });
 export type AdminState = z.infer<typeof AdminStateSchema>;
 
+export const ProactiveTargetSchema = z.object({
+  kind: JobKindSchema.default("task"),
+  chatId: z.string().min(1).max(128),
+  threadId: z.string().min(1).max(128).optional(),
+  requesterId: z.string().min(1).max(128),
+  sessionKey: z.string().min(1).max(256),
+  requiresApproval: z.boolean().default(false),
+  metadata: z.record(z.string().max(2_000)).optional()
+});
+export type ProactiveTarget = z.infer<typeof ProactiveTargetSchema>;
+
+export const ProactiveHeartbeatRuleSchema = z.object({
+  id: z.string().min(1).max(120),
+  everySeconds: z.number().int().min(5).max(86_400),
+  prompt: z.string().min(1).max(20_000),
+  delivery: z
+    .object({
+      mode: z.enum(["announce", "webhook", "none"]).default("announce"),
+      webhookUrl: z.string().url().max(2_000).optional()
+    })
+    .default({ mode: "announce" }),
+  target: ProactiveTargetSchema
+}).superRefine((value, ctx) => {
+  if (value.delivery.mode === "webhook" && !value.delivery.webhookUrl) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "delivery.webhookUrl is required when delivery.mode is webhook"
+    });
+  }
+});
+export type ProactiveHeartbeatRule = z.infer<typeof ProactiveHeartbeatRuleSchema>;
+
+export const ProactiveCronRuleSchema = z.object({
+  id: z.string().min(1).max(120),
+  cron: z.string().min(1).max(120).optional(),
+  at: z.string().min(1).max(120).optional(),
+  everySeconds: z.number().int().min(5).max(86_400).optional(),
+  timezone: z.string().min(1).max(80).optional(),
+  sessionTarget: z.enum(["main", "isolated"]).default("isolated"),
+  wakeMode: z.enum(["now", "next-heartbeat"]).default("now"),
+  prompt: z.string().min(1).max(20_000),
+  delivery: z
+    .object({
+      mode: z.enum(["announce", "webhook", "none"]).default("announce"),
+      webhookUrl: z.string().url().max(2_000).optional()
+    })
+    .default({ mode: "announce" }),
+  target: ProactiveTargetSchema
+}).superRefine((value, ctx) => {
+  const populated = [Boolean(value.cron), Boolean(value.at), Boolean(value.everySeconds)].filter(Boolean).length;
+  if (populated !== 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Exactly one schedule field is required: cron | at | everySeconds"
+    });
+  }
+
+  if (value.delivery.mode === "webhook" && !value.delivery.webhookUrl) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "delivery.webhookUrl is required when delivery.mode is webhook"
+    });
+  }
+
+  if (value.everySeconds && value.timezone) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "timezone is not applicable to everySeconds schedules"
+    });
+  }
+
+  if (value.sessionTarget === "isolated" && value.wakeMode === "next-heartbeat") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "wakeMode=next-heartbeat requires sessionTarget=main"
+    });
+  }
+});
+export type ProactiveCronRule = z.infer<typeof ProactiveCronRuleSchema>;
+
+export const ProactiveRuleDeleteRequestSchema = z.object({
+  id: z.string().min(1).max(120)
+});
+export type ProactiveRuleDeleteRequest = z.infer<typeof ProactiveRuleDeleteRequestSchema>;
+
+export const ProactiveConfigSummarySchema = z.object({
+  enabled: z.boolean(),
+  tickMs: z.number().int().min(500).max(60_000),
+  heartbeatRules: z.array(ProactiveHeartbeatRuleSchema),
+  cronRules: z.array(ProactiveCronRuleSchema),
+  webhookRules: z.array(z.object({ id: z.string().min(1).max(120) }))
+});
+export type ProactiveConfigSummary = z.infer<typeof ProactiveConfigSummarySchema>;
+
 export const jobTerminalStates: JobStatus[] = ["aborted", "completed", "failed"];
 
 export function isTerminalStatus(status: JobStatus): boolean {

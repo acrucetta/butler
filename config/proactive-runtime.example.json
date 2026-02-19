@@ -22,12 +22,35 @@
     {
       "id": "morning-brief",
       "cron": "0 9 * * *",
+      "timezone": "America/New_York",
+      "sessionTarget": "main",
+      "wakeMode": "next-heartbeat",
       "prompt": "Generate the morning brief and top TODOs.",
+      "delivery": {
+        "mode": "announce"
+      },
       "target": {
         "kind": "task",
         "chatId": "123456789",
         "requesterId": "system:cron",
         "sessionKey": "proactive:brief",
+        "requiresApproval": false
+      }
+    },
+    {
+      "id": "disk-check-every-15m",
+      "everySeconds": 900,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "prompt": "Run a quick disk health check and report only if action is needed.",
+      "delivery": {
+        "mode": "none"
+      },
+      "target": {
+        "kind": "task",
+        "chatId": "123456789",
+        "requesterId": "system:cron",
+        "sessionKey": "proactive:disk",
         "requiresApproval": false
       }
     }

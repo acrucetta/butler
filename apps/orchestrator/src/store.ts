@@ -271,6 +271,38 @@ export class OrchestratorStore {
     return false;
   }
 
+  getLatestTerminalJobByMetadata(key: string, value: string): Job | undefined {
+    let latest: Job | undefined;
+    for (const job of Object.values(this.state.jobs)) {
+      if (!isTerminalStatus(job.status)) {
+        continue;
+      }
+      if (job.metadata?.[key] !== value) {
+        continue;
+      }
+      if (!latest) {
+        latest = job;
+        continue;
+      }
+      const currentTs = Date.parse(job.updatedAt);
+      const latestTs = Date.parse(latest.updatedAt);
+      if (currentTs >= latestTs) {
+        latest = job;
+      }
+    }
+    return latest ? structuredClone(latest) : undefined;
+  }
+
+  listProactiveRuns(limit: number, triggerKey?: string): Job[] {
+    const capped = Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.floor(limit))) : 50;
+    const runs = Object.values(this.state.jobs)
+      .filter((job) => typeof job.metadata?.proactiveTriggerKey === "string")
+      .filter((job) => (triggerKey ? job.metadata?.proactiveTriggerKey === triggerKey : true))
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, capped);
+    return runs.map((job) => structuredClone(job));
+  }
+
   getAdminState(): { paused: boolean; pauseReason?: string; updatedAt: string } {
     return {
       paused: this.state.paused,
@@ -285,6 +317,46 @@ export class OrchestratorStore {
     this.state.pauseUpdatedAt = nowIso();
     this.save();
     return this.getAdminState();
+  }
+
+  listPendingProactiveDeliveries(limit: number): Job[] {
+    const capped = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 20;
+    const out: Job[] = [];
+    for (const job of Object.values(this.state.jobs)) {
+      if (!isTerminalStatus(job.status)) {
+        continue;
+      }
+
+      const mode = job.metadata?.proactiveDeliveryMode;
+      if (mode !== "announce" && mode !== "webhook") {
+        continue;
+      }
+
+      if (job.metadata?.proactiveDeliveredAt) {
+        continue;
+      }
+
+      out.push(structuredClone(job));
+      if (out.length >= capped) {
+        break;
+      }
+    }
+    return out;
+  }
+
+  markProactiveDelivery(jobId: string, receipt: string): Job | undefined {
+    const job = this.state.jobs[jobId];
+    if (!job) {
+      return undefined;
+    }
+
+    const metadata = { ...(job.metadata ?? {}) };
+    metadata.proactiveDeliveredAt = nowIso();
+    metadata.proactiveDeliveryReceipt = receipt.slice(0, 2_000);
+    job.metadata = metadata;
+    job.updatedAt = nowIso();
+    this.save();
+    return structuredClone(job);
   }
 
   private removeFromQueue(id: string): void {

@@ -77,6 +77,22 @@ export class OrchestratorClient {
     return AdminStateSchema.parse(payload.admin);
   }
 
+  async listPendingProactiveDeliveries(limit = 20): Promise<Job[]> {
+    const payload = await this.request(`/v1/proactive/deliveries/pending?limit=${encodeURIComponent(String(limit))}`, {
+      method: "GET"
+    });
+    const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+    return jobs.map((job: unknown) => JobSchema.parse(job));
+  }
+
+  async ackProactiveDelivery(jobId: string, receipt: string): Promise<Job> {
+    const payload = await this.request(`/v1/proactive/deliveries/${encodeURIComponent(jobId)}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ receipt })
+    });
+    return JobSchema.parse(payload.job);
+  }
+
   private async request(path: string, init: RequestInit): Promise<any> {
     const controller = new AbortController();
     const timeout = setTimeout(() => {

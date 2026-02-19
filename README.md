@@ -224,10 +224,30 @@ Orchestrator can proactively enqueue jobs from config-driven triggers.
 - Use `config/proactive-runtime.example.json` as a starting template.
 - Trigger types:
   - `heartbeatRules`: enqueue every `everySeconds`.
-  - `cronRules`: enqueue on 5-field cron matches.
+  - `cronRules`: enqueue on exactly one schedule field:
+    - `cron` (5-field cron)
+    - `at` (one-shot ISO timestamp)
+    - `everySeconds` (interval)
+  - `cronRules` optional control fields:
+    - `timezone` (for `cron` schedules)
+    - `sessionTarget`: `main|isolated` (`isolated` uses `sessionKey=cron:<id>`)
+    - `wakeMode`: `now|next-heartbeat` (`next-heartbeat` requires `sessionTarget=main`)
   - `webhooks`: `POST /v1/proactive/webhooks/:webhookId` with `x-webhook-secret`.
 - Duplicate runs for the same trigger are skipped while a previous trigger job is still non-terminal.
+- Recurring trigger retries use backoff on failures: `30s -> 1m -> 5m -> 15m -> 60m` (reset on success).
 - Inspect runtime with `GET /v1/proactive/state` (gateway API key required).
+- Inspect active config with `GET /v1/proactive/config`.
+- Inspect run ledger with `GET /v1/proactive/runs`.
+- Delivery modes for proactive rules:
+  - `announce`: gateway auto-posts terminal result to target Telegram chat/thread.
+  - `webhook`: gateway POSTs terminal result payload to `delivery.webhookUrl`.
+  - `none`: no post-delivery action.
+- OpenClaw-style tool surface for cron management:
+  - `GET /v1/tools`
+  - `POST /v1/tools/invoke` with:
+    - `cron.list|cron.add|cron.update|cron.remove|cron.run`
+    - `heartbeat.list|heartbeat.add|heartbeat.update|heartbeat.remove|heartbeat.run`
+    - `proactive.runs`
 
 Webhook example:
 
