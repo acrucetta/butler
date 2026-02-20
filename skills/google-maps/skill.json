@@ -1,0 +1,13 @@
+{
+  "id": "google-maps",
+  "name": "Google Maps",
+  "description": "Places lookup, travel time, and route planning workflows.",
+  "tags": ["maps", "travel", "directions", "commute"],
+  "env": [
+    "GOOGLE_MAPS_API_KEY"
+  ],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}

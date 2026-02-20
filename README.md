@@ -311,6 +311,40 @@ Set `BRAVE_API_KEY` in `.env` (and on your production worker host), then run:
 npm run butler -- mcp sync
 ```
 
+## Skills (simple local model)
+
+Butler supports a simplified personal skill architecture inspired by OpenClaw:
+
+- One local skills directory: `skills/<skill-id>/`
+- Each skill folder contains:
+  - `SKILL.md` (instructions/context)
+  - `skill.json` (metadata, required env vars, optional MCP tool definitions)
+- One config file: `.data/skills/config.json`
+
+Skill CLI:
+
+```bash
+npm run butler -- skills init
+npm run butler -- skills list
+npm run butler -- skills add whoop
+npm run butler -- skills setup whoop
+npm run butler -- skills enable whoop
+npm run butler -- skills disable whoop
+npm run butler -- skills sync
+```
+
+Notes:
+- `skills setup <id>` writes required skill env vars to `.env`.
+- `skills sync` merges enabled skill MCP definitions with base `config/mcporter.json` + `config/mcp-clis.json`,
+  writes generated files under `.data/skills/`, and runs MCP wrapper generation.
+
+Worker runtime env options:
+- `PI_SKILLS_CONFIG_FILE` (default: `.data/skills/config.json`)
+- `PI_SKILLS_DIR` (default: `skills`)
+- `PI_SKILLS_MODE` (`auto|always|off`)
+- `PI_SKILLS_CONTEXT_WINDOW` (max skills included in prompt context)
+- `PI_SKILLS_MAX_CHARS` (max prompt chars allocated to skills context)
+
 ## Security/hardening defaults in this repo
 
 - Mandatory strong API secrets (`ORCH_GATEWAY_TOKEN`, `ORCH_WORKER_TOKEN`, 16+ chars)

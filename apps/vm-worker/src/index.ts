@@ -4,6 +4,7 @@ import { delimiter, resolve } from "node:path";
 import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
 import { ModelRoutingRuntime } from "./model-routing.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
+import { parseSkillsMode, resolveSkillsContext } from "./skills-runtime.js";
 import { ToolPolicyRuntime } from "./tool-policy.js";
 
 const orchestratorBaseUrl = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8787";
@@ -23,6 +24,11 @@ const modelRoutingConfigRequired = Boolean(process.env.PI_MODEL_ROUTING_FILE);
 const toolPolicyConfigFile = resolve(process.env.PI_TOOL_POLICY_FILE ?? ".data/worker/tool-policy.json");
 const toolPolicyConfigRequired = Boolean(process.env.PI_TOOL_POLICY_FILE);
 const mcpCliBinDir = resolve(process.env.BUTLER_MCP_BIN_DIR ?? ".data/mcp/bin");
+const skillsConfigFile = resolve(process.env.PI_SKILLS_CONFIG_FILE ?? ".data/skills/config.json");
+const skillsModeOverride = parseSkillsMode(process.env.PI_SKILLS_MODE);
+const skillsContextWindowOverride = parsePositiveInt(process.env.PI_SKILLS_CONTEXT_WINDOW);
+const skillsMaxCharsOverride = parsePositiveInt(process.env.PI_SKILLS_MAX_CHARS);
+const skillsDir = process.env.PI_SKILLS_DIR ? resolve(process.env.PI_SKILLS_DIR) : undefined;
 
 mkdirSync(piCwd, { recursive: true });
 mkdirSync(piSessionRoot, { recursive: true });
@@ -66,6 +72,9 @@ async function run(): Promise<void> {
     console.log(`[worker] rpc sessions=${piSessionRoot}`);
     console.log(`[worker] model routing config=${modelRoutingConfigFile} source=${modelRouting.getSourceLabel()}`);
     console.log(`[worker] tool policy config=${toolPolicyConfigFile} source=${toolPolicy.getSourceLabel()}`);
+    console.log(
+      `[worker] skills config=${skillsConfigFile} mode=${skillsModeOverride ?? "config"} contextWindow=${skillsContextWindowOverride ?? "config"}`
+    );
   }
 
   while (!shuttingDown) {
@@ -147,7 +156,23 @@ async function runJob(job: Job): Promise<void> {
   }, 1200);
 
   try {
-    const preparedPrompt = buildPromptWithWorkspaceContext(job.prompt, piCwd);
+    const skillsContext = resolveSkillsContext({
+      userPrompt: job.prompt,
+      workspaceRoot: piCwd,
+      skillsDir,
+      configPath: skillsConfigFile,
+      modeOverride: skillsModeOverride ?? undefined,
+      contextWindowOverride: skillsContextWindowOverride ?? undefined,
+      maxCharsOverride: skillsMaxCharsOverride ?? undefined
+    });
+    if (skillsContext.selected.length > 0) {
+      await postEvent(
+        job.id,
+        "log",
+        `Skills selected (${skillsContext.mode}): ${skillsContext.selected.map((skill) => skill.id).join(", ")}`
+      );
+    }
+    const preparedPrompt = buildPromptWithWorkspaceContext(job.prompt, piCwd, skillsContext.context);
     const plan = modelRouting.buildPlan(job);
     await postEvent(
       job.id,
@@ -432,7 +457,7 @@ function defaultMemoryPrompt(): string {
   ].join("\n");
 }
 
-function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: string): string {
+function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: string, skillsContext: string): string {
   const soulPath = resolve(workspaceRoot, "SOUL.md");
   const memoryPath = resolve(workspaceRoot, "MEMORY.md");
   const today = new Date();
@@ -461,6 +486,10 @@ function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: stri
     }
   }
 
+  if (skillsContext.trim().length > 0) {
+    sections.push(`## SKILLS\n${skillsContext}`);
+  }
+
   if (sections.length === 0) {
     return userPrompt;
   }
@@ -472,6 +501,17 @@ function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: stri
     "## User request",
     userPrompt
   ].join("\n\n");
+}
+
+function parsePositiveInt(value: string | undefined): number | null {
+  if (!value || value.trim().length === 0) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
 }
 
 function readTextIfExists(filePath: string, maxChars: number): string {

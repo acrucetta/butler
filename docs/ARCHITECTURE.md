@@ -30,6 +30,7 @@ flowchart LR
     WORKER -->|claim/heartbeat/events/complete/fail| ORCH
     WORKER -->|PATH includes generated wrappers| MCPBIN[.data/mcp/bin]
     WORKER --> PMEM[(SOUL.md + MEMORY.md + memory/YYYY-MM-DD.md)]
+    WORKER --> SKDIR[(skills/* + .data/skills/config.json)]
 
     CLI[butler CLI] -. setup .-> ENV[.env]
     CLI -. doctor/up .-> GW
@@ -37,6 +38,7 @@ flowchart LR
     CLI -. doctor/up .-> WORKER
     CLI -. mcp init/list/sync .-> MCPCFG[config/mcp-clis.json + config/mcporter.json]
     CLI -. mcp sync .-> MCPBIN
+    CLI -. skills init/list/add/setup/enable/disable/sync .-> SKDIR
 ```
 
 ## Persistence surfaces
@@ -61,6 +63,7 @@ flowchart TB
 - `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
 - `vm-worker` includes model routing that selects a profile chain (by job kind/metadata) and performs guarded fallback.
 - `vm-worker` enforces worker-local tool policy rules (allow/deny) during RPC tool invocation.
+- `vm-worker` selects enabled local skills from `skills/*` and injects skill guidance into job prompt context.
 - `pi` runtime is only invoked by `vm-worker`.
 - `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
 - In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.

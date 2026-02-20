@@ -1,0 +1,15 @@
+{
+  "id": "gmail",
+  "name": "Gmail",
+  "description": "Inbox triage, drafts, and thread search workflows.",
+  "tags": ["gmail", "email", "inbox", "google"],
+  "env": [
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN"
+  ],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}

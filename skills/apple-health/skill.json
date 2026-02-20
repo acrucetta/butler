@@ -1,0 +1,13 @@
+{
+  "id": "apple-health",
+  "name": "Apple Health",
+  "description": "Health export ingestion and trend summaries.",
+  "tags": ["apple health", "health", "steps", "heart rate", "sleep"],
+  "env": [
+    "APPLE_HEALTH_EXPORT_PATH"
+  ],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}

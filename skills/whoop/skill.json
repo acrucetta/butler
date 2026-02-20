@@ -1,0 +1,15 @@
+{
+  "id": "whoop",
+  "name": "Whoop",
+  "description": "Recovery, strain, and sleep trend workflows.",
+  "tags": ["whoop", "fitness", "recovery", "sleep", "strain"],
+  "env": [
+    "WHOOP_CLIENT_ID",
+    "WHOOP_CLIENT_SECRET",
+    "WHOOP_REFRESH_TOKEN"
+  ],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "readwise",
+  "name": "Readwise",
+  "description": "Fetch highlights, notes, and review summaries.",
+  "tags": ["readwise", "notes", "highlights", "learning"],
+  "env": [
+    "READWISE_API_TOKEN"
+  ],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "mode": "auto",
+  "contextWindow": 4,
+  "maxChars": 12000,
+  "enabledSkills": [
+    "google-calendar",
+    "gmail"
+  ]
+}

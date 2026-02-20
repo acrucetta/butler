@@ -5,6 +5,20 @@ import { delimiter, dirname, resolve } from "node:path";
 import readline from "node:readline";
 import { Command } from "commander";
 import dotenv from "dotenv";
+import {
+  DEFAULT_SKILLS_DIR,
+  DEFAULT_SKILLS_CONFIG_PATH,
+  DEFAULT_SKILLS_OUTPUT_DIR,
+  disableSkill,
+  defaultSkillsConfig,
+  discoverSkills,
+  enableSkill,
+  loadSkillsConfig,
+  mergeEnabledSkillsIntoMcp,
+  resolveEnabledSkills,
+  saveSkillsConfig,
+  writeSkillScaffold
+} from "./skills-lib.mjs";
 
 const REQUIRED_KEYS = [
   "ORCH_GATEWAY_TOKEN",
@@ -180,6 +194,277 @@ export async function runButlerCli(options = {}) {
 
   const mcp = program.command("mcp").description("Manage MCP server CLI wrappers via mcporter");
   const policy = program.command("policy").description("Manage worker tool policy config");
+  const skills = program.command("skills").description("Manage OpenClaw-style skill packages");
+
+  skills
+    .command("init")
+    .description("Create skills config file")
+    .option("--config-path <path>", "path to skills config file", DEFAULT_SKILLS_CONFIG_PATH)
+    .option("--force", "overwrite existing skills config")
+    .action((cmdOptions) => {
+      const configPath = resolve(process.cwd(), cmdOptions.configPath);
+      if (existsSync(configPath) && !cmdOptions.force) {
+        console.error(`skills init: file already exists at ${configPath} (use --force to overwrite)`);
+        process.exitCode = 1;
+        return;
+      }
+
+      saveSkillsConfig(configPath, defaultSkillsConfig());
+      console.log(`skills init: wrote ${configPath}`);
+      console.log("Next:");
+      console.log(`- Add skills under ${resolve(process.cwd(), DEFAULT_SKILLS_DIR)}`);
+      console.log(`- Run: npm run ${cliName} -- skills list`);
+      console.log(`- Run: npm run ${cliName} -- skills sync`);
+    });
+
+  skills
+    .command("list")
+    .description("List discovered skills and effective enablement")
+    .option("--config-path <path>", "path to skills config file", DEFAULT_SKILLS_CONFIG_PATH)
+    .option("--skills-dir <path>", "skills directory", DEFAULT_SKILLS_DIR)
+    .option("--env-path <path>", "path to env file for required credential checks", ".env")
+    .action((cmdOptions) => {
+      const configPath = resolve(process.cwd(), cmdOptions.configPath);
+      const config = loadSkillsConfig(configPath);
+      const envPath = resolve(process.cwd(), cmdOptions.envPath);
+      const envValues = {
+        ...readEnvMap(envPath),
+        ...process.env
+      };
+      const allSkills = discoverSkills({
+        workspaceRoot: process.cwd(),
+        skillsDir: resolve(process.cwd(), cmdOptions.skillsDir)
+      });
+      const enabled = new Set(resolveEnabledSkills(allSkills, config).map((skill) => skill.id));
+
+      console.log(
+        `skills list: ${allSkills.length} discovered, ${enabled.size} enabled (mode=${config.mode}, config=${configPath})`
+      );
+      if (allSkills.length === 0) {
+        console.log("- no skills found");
+        return;
+      }
+
+      for (const skill of allSkills) {
+        const missingEnv = (skill.env ?? []).filter((name) => !String(envValues[name] ?? "").trim());
+        const status = enabled.has(skill.id) ? "enabled" : "disabled";
+        const tags = skill.tags.length > 0 ? ` tags=${skill.tags.join(",")}` : "";
+        const envStatus = missingEnv.length > 0 ? ` missingEnv=${missingEnv.join(",")}` : "";
+        console.log(`- ${skill.id} (${status})${tags}${envStatus}`);
+      }
+    });
+
+  skills
+    .command("enable")
+    .description("Enable a skill")
+    .argument("<skill-id>", "skill id")
+    .option("--config-path <path>", "path to skills config file", DEFAULT_SKILLS_CONFIG_PATH)
+    .option("--skills-dir <path>", "skills directory", DEFAULT_SKILLS_DIR)
+    .action((skillId, cmdOptions) => {
+      const configPath = resolve(process.cwd(), cmdOptions.configPath);
+      const normalized = normalizeSkillId(skillId);
+      const discovered = discoverSkills({
+        workspaceRoot: process.cwd(),
+        skillsDir: resolve(process.cwd(), cmdOptions.skillsDir)
+      });
+      if (!discovered.find((skill) => skill.id === normalized)) {
+        console.error(`skills enable: unknown skill '${skillId}'`);
+        process.exitCode = 1;
+        return;
+      }
+      enableSkill(configPath, normalized);
+      console.log(`skills enable: ${skillId} enabled in ${configPath}`);
+    });
+
+  skills
+    .command("disable")
+    .description("Disable a skill")
+    .argument("<skill-id>", "skill id")
+    .option("--config-path <path>", "path to skills config file", DEFAULT_SKILLS_CONFIG_PATH)
+    .action((skillId, cmdOptions) => {
+      const configPath = resolve(process.cwd(), cmdOptions.configPath);
+      disableSkill(configPath, skillId);
+      console.log(`skills disable: ${skillId} disabled in ${configPath}`);
+    });
+
+  skills
+    .command("setup")
+    .description("Configure required env vars for a skill")
+    .argument("<skill-id>", "skill id")
+    .option("--skills-dir <path>", "skills directory", DEFAULT_SKILLS_DIR)
+    .option("--env-path <path>", "path to env file", ".env")
+    .option("--set <pair>", "key=value pair (repeatable)", collectRepeatableOption, [])
+    .option("--yes", "non-interactive; apply only --set values")
+    .action(async (skillId, cmdOptions) => {
+      const normalized = normalizeSkillId(skillId);
+      const skillsDir = resolve(process.cwd(), cmdOptions.skillsDir);
+      const skill = discoverSkills({ workspaceRoot: process.cwd(), skillsDir }).find((entry) => entry.id === normalized);
+
+      if (!skill) {
+        console.error(`skills setup: unknown skill '${skillId}'`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!Array.isArray(skill.env) || skill.env.length === 0) {
+        console.log(`skills setup: ${normalized} does not declare required env vars`);
+        return;
+      }
+
+      const envPath = resolve(process.cwd(), cmdOptions.envPath);
+      const existing = readEnvMap(envPath);
+      let explicit;
+      try {
+        explicit = parseKeyValuePairs(cmdOptions.set ?? []);
+      } catch (error) {
+        console.error(`skills setup: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+        return;
+      }
+      const updates = {};
+
+      const interactive = process.stdin.isTTY && !Boolean(cmdOptions.yes);
+      let rl = null;
+      if (interactive) {
+        rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout
+        });
+      }
+
+      try {
+        for (const key of skill.env) {
+          const explicitValue = explicit[key];
+          if (typeof explicitValue === "string") {
+            updates[key] = explicitValue;
+            continue;
+          }
+
+          const current = coalesce(process.env[key], existing[key]);
+          if (interactive && rl) {
+            updates[key] = await promptForValue(rl, key, current, true);
+            continue;
+          }
+
+          if (current.length > 0) {
+            updates[key] = current;
+            continue;
+          }
+
+          console.error(`skills setup: missing ${key}. Provide --set ${key}=... or run interactively.`);
+          process.exitCode = 1;
+          return;
+        }
+      } finally {
+        rl?.close();
+      }
+
+      upsertEnvFile(envPath, updates);
+      console.log(`skills setup: wrote ${envPath}`);
+      for (const key of skill.env) {
+        console.log(`- ${key}=${maskSecret(String(updates[key] ?? ""))}`);
+      }
+    });
+
+  skills
+    .command("add")
+    .alias("scaffold")
+    .description("Create a new local skill scaffold")
+    .argument("<skill-id>", "skill id (e.g. google-calendar)")
+    .option("--skills-dir <path>", "skills directory", DEFAULT_SKILLS_DIR)
+    .action((skillId, cmdOptions) => {
+      try {
+        const skillDir = writeSkillScaffold({
+          id: skillId,
+          workspaceRoot: process.cwd(),
+          skillsDir: resolve(process.cwd(), cmdOptions.skillsDir)
+        });
+        console.log(`skills add: created ${skillDir}`);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      }
+    });
+
+  skills
+    .command("sync")
+    .description("Merge enabled skill MCP surfaces and run mcporter sync")
+    .option("--config-path <path>", "path to skills config file", DEFAULT_SKILLS_CONFIG_PATH)
+    .option("--skills-dir <path>", "skills directory", DEFAULT_SKILLS_DIR)
+    .option("--mcp-spec-path <path>", "base MCP manifest file", DEFAULT_MCP_SPEC_PATH)
+    .option("--mcporter-config-path <path>", "base mcporter config file (optional override)")
+    .option("--output-dir <path>", "generated skill artifact directory", DEFAULT_SKILLS_OUTPUT_DIR)
+    .option("--target <name>", "sync one target by name (repeatable)", collectRepeatableOption, [])
+    .option("--dry-run", "print planned mcporter commands without executing")
+    .option("--skip-types", "skip mcporter emit-ts for all targets")
+    .action((cmdOptions) => {
+      try {
+        const configPath = resolve(process.cwd(), cmdOptions.configPath);
+        const config = loadSkillsConfig(configPath);
+        const discovered = discoverSkills({
+          workspaceRoot: process.cwd(),
+          skillsDir: resolve(process.cwd(), cmdOptions.skillsDir)
+        });
+        const enabled = resolveEnabledSkills(discovered, config);
+
+        const baseSpecPath = resolve(process.cwd(), cmdOptions.mcpSpecPath);
+        const baseSpec = ensureMcpSpecFile(baseSpecPath, false);
+        const baseTargets = validateMcpTargets(baseSpec.targets ?? [], baseSpecPath);
+
+        const mcporterConfigPath = resolve(
+          process.cwd(),
+          cmdOptions.mcporterConfigPath ?? String(baseSpec.mcporterConfigPath ?? DEFAULT_MCPORTER_CONFIG_PATH)
+        );
+        if (!existsSync(mcporterConfigPath)) {
+          console.error(`skills sync: missing mcporter config at ${mcporterConfigPath}`);
+          process.exitCode = 1;
+          return;
+        }
+
+        const baseMcporter = JSON.parse(readFileSync(mcporterConfigPath, "utf8"));
+        const merged = mergeEnabledSkillsIntoMcp({
+          baseMcporter,
+          baseTargets,
+          enabledSkills: enabled
+        });
+
+        const outputDir = resolve(process.cwd(), cmdOptions.outputDir);
+        mkdirSync(outputDir, { recursive: true });
+        const generatedMcporterPath = resolve(outputDir, "mcporter.generated.json");
+        const generatedSpecPath = resolve(outputDir, "mcp-clis.generated.json");
+
+        writeFileSync(generatedMcporterPath, `${JSON.stringify(merged.mcporter, null, 2)}\n`, "utf8");
+        writeFileSync(
+          generatedSpecPath,
+          `${JSON.stringify(
+            {
+              ...baseSpec,
+              mcporterConfigPath: generatedMcporterPath,
+              targets: merged.targets
+            },
+            null,
+            2
+          )}\n`,
+          "utf8"
+        );
+
+        console.log(
+          `skills sync: ${discovered.length} discovered, ${enabled.length} enabled, ${merged.targets.length} merged targets`
+        );
+        console.log(`skills sync: generated ${generatedMcporterPath}`);
+        console.log(`skills sync: generated ${generatedSpecPath}`);
+
+        syncMcpTargets({
+          specPath: generatedSpecPath,
+          targetNames: cmdOptions.target ?? [],
+          dryRun: Boolean(cmdOptions.dryRun),
+          skipTypes: Boolean(cmdOptions.skipTypes)
+        });
+      } catch (error) {
+        console.error(`skills sync: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+      }
+    });
 
   policy
     .command("init")
@@ -281,79 +566,12 @@ export async function runButlerCli(options = {}) {
     .option("--dry-run", "print planned mcporter commands without executing")
     .option("--skip-types", "skip mcporter emit-ts for all targets")
     .action((cmdOptions) => {
-      const specPath = resolve(process.cwd(), cmdOptions.configPath);
-      const spec = ensureMcpSpecFile(specPath, false);
-      const selectedNames = new Set(cmdOptions.target ?? []);
-      const allTargets = validateMcpTargets(spec.targets ?? [], specPath);
-      const targets = selectedNames.size > 0 ? allTargets.filter((target) => selectedNames.has(target.name)) : allTargets;
-
-      if (targets.length === 0) {
-        const selection = selectedNames.size > 0 ? ` matching ${Array.from(selectedNames).join(", ")}` : "";
-        console.log(`mcp sync: no targets configured${selection}`);
-        return;
-      }
-
-      const paths = resolveMcpPaths(spec);
-      if (!existsSync(paths.mcporterConfigPath)) {
-        console.error(`mcp sync: missing mcporter config at ${paths.mcporterConfigPath}`);
-        process.exitCode = 1;
-        return;
-      }
-
-      mkdirSync(paths.templateDir, { recursive: true });
-      mkdirSync(paths.binDir, { recursive: true });
-      mkdirSync(paths.typesDir, { recursive: true });
-
-      console.log(`mcp sync: syncing ${targets.length} target(s)`);
-      for (const target of targets) {
-        const templatePath = resolve(paths.templateDir, `${target.name}.ts`);
-
-        runMcporterCommand(
-          [
-            "generate-cli",
-            target.selector,
-            "--config",
-            paths.mcporterConfigPath,
-            "--name",
-            target.name,
-            "--runtime",
-            "node",
-            "--timeout",
-            String(target.timeoutMs),
-            "--output",
-            templatePath
-          ],
-          cmdOptions.dryRun
-        );
-
-        if (!cmdOptions.dryRun) {
-          if (!existsSync(templatePath)) {
-            console.error(`mcp sync: expected generated template at ${templatePath}, but it was not created`);
-            process.exit(1);
-          }
-          sanitizeGeneratedTemplate(templatePath);
-          writeMcpLauncher(paths.binDir, target.name, templatePath);
-        }
-
-        if (!cmdOptions.skipTypes && target.emitTypes !== false) {
-          const outPath = resolve(paths.typesDir, `${target.name}.d.ts`);
-          runMcporterCommand(
-            [
-              "emit-ts",
-              target.selector,
-              "--config",
-              paths.mcporterConfigPath,
-              "--mode",
-              "types",
-              "--out",
-              outPath
-            ],
-            cmdOptions.dryRun
-          );
-        }
-      }
-
-      console.log(`mcp sync: done. binaries are in ${paths.binDir}`);
+      syncMcpTargets({
+        specPath: resolve(process.cwd(), cmdOptions.configPath),
+        targetNames: cmdOptions.target ?? [],
+        dryRun: Boolean(cmdOptions.dryRun),
+        skipTypes: Boolean(cmdOptions.skipTypes)
+      });
     });
 
   await program.parseAsync(process.argv);
@@ -573,8 +791,105 @@ function validateMcpTargets(rawTargets, specPath) {
   return targets;
 }
 
+function syncMcpTargets({ specPath, targetNames, dryRun, skipTypes }) {
+  const spec = ensureMcpSpecFile(specPath, false);
+  const selectedNames = new Set(targetNames ?? []);
+  const allTargets = validateMcpTargets(spec.targets ?? [], specPath);
+  const targets = selectedNames.size > 0 ? allTargets.filter((target) => selectedNames.has(target.name)) : allTargets;
+
+  if (targets.length === 0) {
+    const selection = selectedNames.size > 0 ? ` matching ${Array.from(selectedNames).join(", ")}` : "";
+    console.log(`mcp sync: no targets configured${selection}`);
+    return;
+  }
+
+  const paths = resolveMcpPaths(spec);
+  if (!existsSync(paths.mcporterConfigPath)) {
+    console.error(`mcp sync: missing mcporter config at ${paths.mcporterConfigPath}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  mkdirSync(paths.templateDir, { recursive: true });
+  mkdirSync(paths.binDir, { recursive: true });
+  mkdirSync(paths.typesDir, { recursive: true });
+
+  console.log(`mcp sync: syncing ${targets.length} target(s)`);
+  for (const target of targets) {
+    const templatePath = resolve(paths.templateDir, `${target.name}.ts`);
+
+    runMcporterCommand(
+      [
+        "generate-cli",
+        target.selector,
+        "--config",
+        paths.mcporterConfigPath,
+        "--name",
+        target.name,
+        "--runtime",
+        "node",
+        "--timeout",
+        String(target.timeoutMs),
+        "--output",
+        templatePath
+      ],
+      dryRun
+    );
+
+    if (!dryRun) {
+      if (!existsSync(templatePath)) {
+        console.error(`mcp sync: expected generated template at ${templatePath}, but it was not created`);
+        process.exit(1);
+      }
+      sanitizeGeneratedTemplate(templatePath);
+      writeMcpLauncher(paths.binDir, target.name, templatePath);
+    }
+
+    if (!skipTypes && target.emitTypes !== false) {
+      const outPath = resolve(paths.typesDir, `${target.name}.d.ts`);
+      runMcporterCommand(
+        [
+          "emit-ts",
+          target.selector,
+          "--config",
+          paths.mcporterConfigPath,
+          "--mode",
+          "types",
+          "--out",
+          outPath
+        ],
+        dryRun
+      );
+    }
+  }
+
+  console.log(`mcp sync: done. binaries are in ${paths.binDir}`);
+}
+
 function collectRepeatableOption(value, previous = []) {
   return [...previous, value];
+}
+
+function parseKeyValuePairs(pairs) {
+  const parsed = {};
+  for (const pair of pairs) {
+    const text = String(pair ?? "");
+    const index = text.indexOf("=");
+    if (index <= 0) {
+      throw new Error(`Invalid --set value '${text}'. Expected KEY=VALUE.`);
+    }
+    const key = text.slice(0, index).trim();
+    const value = text.slice(index + 1);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`Invalid env key '${key}' in --set '${text}'`);
+    }
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+function normalizeSkillId(value) {
+  return String(value).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
 }
 
 function parsePositiveInteger(raw, fallback) {

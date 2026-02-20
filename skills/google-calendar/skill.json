@@ -1,0 +1,15 @@
+{
+  "id": "google-calendar",
+  "name": "Google Calendar",
+  "description": "Calendar scheduling and event management workflows.",
+  "tags": ["calendar", "meetings", "schedule", "google"],
+  "env": [
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN"
+  ],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}
