@@ -16,6 +16,7 @@ import {
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { MemoryService } from "./memory-service.js";
+import { MemorySemanticIndex } from "./memory-semantic-index.js";
 import { ProactiveRuntime } from "./proactive-runtime.js";
 import { OrchestratorStore } from "./store.js";
 
@@ -27,14 +28,20 @@ const proactiveConfigPath = resolve(
 );
 const memoryRoot = resolve(process.env.ORCH_MEMORY_ROOT ?? process.cwd());
 const memoryLedgerPath = resolve(process.env.ORCH_MEMORY_LEDGER_FILE ?? ".data/orchestrator/memory-ledger.jsonl");
+const memoryIndexPath = resolve(process.env.ORCH_MEMORY_INDEX_FILE ?? ".data/orchestrator/memory-index.json");
 const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWAY_TOKEN);
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
 
 mkdirSync(dirname(statePath), { recursive: true });
 mkdirSync(dirname(proactiveConfigPath), { recursive: true });
 mkdirSync(dirname(memoryLedgerPath), { recursive: true });
+mkdirSync(dirname(memoryIndexPath), { recursive: true });
 const store = new OrchestratorStore(statePath);
 const memory = new MemoryService(memoryRoot, memoryLedgerPath);
+const memorySemantic = new MemorySemanticIndex({
+  memoryRoot,
+  indexFile: memoryIndexPath
+});
 const proactive = new ProactiveRuntime(
   store,
   loadProactiveConfig(proactiveConfigPath),
@@ -319,14 +326,16 @@ app.get("/v1/tools", requireApiKey(gatewayToken), (_req, res) => {
       { name: "heartbeat.remove", description: "Delete a proactive heartbeat rule by id." },
       { name: "heartbeat.run", description: "Trigger an existing proactive heartbeat rule immediately." },
       { name: "proactive.runs", description: "List recent proactive run ledger entries." },
-      { name: "memory.search", description: "Search memory files using relevance ranking across daily + durable memory." },
+      { name: "memory.search", description: "Semantic search across memory files (local vector index)." },
       { name: "memory.store", description: "Store a memory entry in daily or durable scope." },
-      { name: "memory.ledger", description: "List recent memory write ledger entries." }
+      { name: "memory.ledger", description: "List recent memory write ledger entries." },
+      { name: "memory.index", description: "Rebuild semantic memory index." },
+      { name: "memory.status", description: "Get semantic memory index status." }
     ]
   });
 });
 
-app.post("/v1/tools/invoke", requireApiKey(gatewayToken), (req, res, next) => {
+app.post("/v1/tools/invoke", requireApiKey(gatewayToken), async (req, res, next) => {
   try {
     const parsed = ToolsInvokeRequestSchema.parse(req.body ?? {});
     const args = parsed.arguments;
@@ -416,7 +425,7 @@ app.post("/v1/tools/invoke", requireApiKey(gatewayToken), (req, res, next) => {
         query: z.string().min(1).max(500),
         limit: z.number().int().min(1).max(50).default(10)
       }).parse(args);
-      const hits = memory.search(body.query, body.limit);
+      const hits = await memorySemantic.search(body.query, body.limit);
       res.json({ ok: true, result: { hits } });
       return;
     }
@@ -427,6 +436,7 @@ app.post("/v1/tools/invoke", requireApiKey(gatewayToken), (req, res, next) => {
         scope: z.enum(["daily", "durable"]).default("daily")
       }).parse(args);
       const stored = memory.store(body.text, body.scope);
+      await memorySemantic.rebuild();
       res.json({ ok: true, result: stored });
       return;
     }
@@ -435,6 +445,18 @@ app.post("/v1/tools/invoke", requireApiKey(gatewayToken), (req, res, next) => {
       const body = z.object({ limit: z.number().int().min(1).max(200).default(50) }).parse(args);
       const entries = memory.ledger(body.limit);
       res.json({ ok: true, result: { entries } });
+      return;
+    }
+
+    if (parsed.tool === "memory.index") {
+      const rebuilt = await memorySemantic.rebuild();
+      res.json({ ok: true, result: rebuilt });
+      return;
+    }
+
+    if (parsed.tool === "memory.status") {
+      const status = memorySemantic.status();
+      res.json({ ok: true, result: status });
       return;
     }
 
