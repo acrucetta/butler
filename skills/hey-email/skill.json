@@ -1,0 +1,11 @@
+{
+  "id": "hey-email",
+  "name": "HEY Email",
+  "description": "HEY inbox workflows through a HEY-to-Gmail bridge and gog Gmail commands.",
+  "tags": ["hey", "email", "inbox", "gmail", "bridge"],
+  "env": [],
+  "tools": {
+    "mcpServers": {},
+    "targets": []
+  }
+}

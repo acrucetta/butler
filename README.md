@@ -90,6 +90,8 @@ npm run butler -- setup
 ```
 
 This wizard walks you through Telegram + env setup and writes/updates `.env`.
+In interactive mode, it also offers prebuilt skill onboarding (`readwise`, `gmail`, `google-calendar`, `hey-email`) so users can enable/configure them during first setup.
+Interactive setup uses a step-by-step TUI Q&A flow (selects, toggles, and value prompts) similar to OpenClaw onboarding.
 
 For automation (CI/provisioning), use non-interactive flags:
 
@@ -100,6 +102,20 @@ npm run butler -- setup --yes \
   --gateway-token "<16+ char secret>" \
   --worker-token "<16+ char secret>"
 ```
+
+Optional skill onboarding flags for setup:
+- `--skills readwise,gmail` to set the exact prebuilt skills enabled during setup.
+- `--skill-env KEY=VALUE` (repeatable) to provide required skill env vars (for example `ACCESS_TOKEN` for Readwise).
+- `--sync-selected-skills` to run MCP wrapper generation for selected MCP-backed skills during setup.
+- `--flow quickstart|manual` to choose onboarding style (`quickstart` asks fewer questions).
+- when `gmail`/`google-calendar` are selected, setup checks `gog` auth status and can launch `gog auth login` interactively.
+- if `gog` OAuth client credentials are missing, setup explains where to create them (Google Cloud Console) and can run `gog auth credentials set <credentials.json>`.
+- setup can optionally write `GOG_ACCOUNT=<email>` to pin a default Google account for `gog`.
+
+When setup detects an existing `.env` or skills config, interactive mode first asks whether to:
+- keep current config and exit,
+- modify current config,
+- reset setup values and run onboarding again.
 
 3. (Optional) Manual `.env` values if you prefer to edit directly:
 
@@ -163,6 +179,26 @@ Legacy alias still works:
 
 ```bash
 npm run pi-self -- up --mode mock
+```
+
+## Butler TUI (Ink)
+
+For an OpenClaw-style runtime control surface, launch Butler's terminal UI:
+
+```bash
+npm run butler -- tui
+```
+
+Controls:
+- `r`: refresh snapshot
+- `m`: toggle doctor mode (`mock`/`rpc`)
+- `i`: show/hide issue details
+- `q`: quit
+
+Optional flags:
+
+```bash
+npm run butler -- tui --mode rpc --refresh-ms 3000
 ```
 
 ## OpenClaw-style personality + memory
@@ -338,6 +374,18 @@ Notes:
 - `skills setup <id>` writes required skill env vars to `.env`.
 - `skills sync` merges enabled skill MCP definitions with base `config/mcporter.json` + `config/mcp-clis.json`,
   writes generated files under `.data/skills/`, and runs MCP wrapper generation.
+- `whoop` is prewired to `@alacore/whoop-mcp-server`; set `WHOOP_CLIENT_ID`, `WHOOP_CLIENT_SECRET`, `WHOOP_REDIRECT_URI`,
+  and `WHOOP_SCOPES` (must include `offline`) before enabling.
+- `readwise` is prewired to `@readwise/readwise-mcp`; set `ACCESS_TOKEN`, then run:
+  - `npm run butler -- skills enable readwise`
+  - `npm run butler -- skills sync --target readwise`
+- `gmail` and `google-calendar` follow OpenClaw's `gog` CLI workflow (not MCP wrapper generation):
+  - install `gog` on the worker host
+  - run `gog auth login` and `gog auth list`
+  - for headless droplet usage, copy `~/.gog/` from a machine that completed login
+- `hey-email` uses a HEY-to-Gmail bridge pattern because HEY has no stable public API/MCP path:
+  - forward/screen HEY mail into Gmail with a dedicated label (for example `label:hey`)
+  - query it through `gog gmail --query "label:hey ..."`
 
 Worker runtime env options:
 - `PI_SKILLS_CONFIG_FILE` (default: `.data/skills/config.json`)

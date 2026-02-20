@@ -8,6 +8,15 @@ Use this skill to read availability, create events, and update schedules.
 - Respect user timezone and use ISO timestamps.
 
 ## Setup
-- Provide OAuth credentials in the env vars listed in `skill.json`.
-- Add MCP server and target entries in `skill.json`.
-- Run `npm run butler -- skills sync`.
+- Install OpenClaw's Google CLI (`gog`) on the worker host.
+- Authenticate once with:
+  - `gog auth login`
+  - `gog auth list`
+- For headless droplet deployment, run login on a machine with a browser, then copy `~/.gog/` to the droplet user home.
+- Optional account pinning:
+  - `gog --account "<email-or-alias>" cal --days 7`
+
+## Common Commands
+- `gog cal --days 7`
+- `gog cal --from 2026-02-20 --to 2026-02-27`
+- `gog cal work` (query a specific calendar by name)

@@ -4,6 +4,8 @@
   "maxChars": 12000,
   "enabledSkills": [
     "google-calendar",
-    "gmail"
+    "gmail",
+    "readwise",
+    "hey-email"
   ]
 }

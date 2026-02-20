@@ -9,6 +9,11 @@
             "date": 1771185920814,
             "name": "/Users/acrucettanieto/Documents/Git/butler/logs/mcp-puppeteer-2026-02-15.log",
             "hash": "33f2b60b06979d42661b13fa7ce67c204fadc9b6076e431de1c28d49e86edbb8"
+        },
+        {
+            "date": 1771617249806,
+            "name": "/Users/acrucettanieto/Documents/Git/butler/logs/mcp-puppeteer-2026-02-20.log",
+            "hash": "5f7c34b09620a49e5f2bf2ea85c4c3703973e75dcb1ecaad397939644160ac29"
         }
     ],
     "hashType": "sha256"

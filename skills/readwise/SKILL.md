@@ -8,6 +8,7 @@ Use this skill to retrieve highlights, metadata, and reading review context.
 - Avoid exposing private highlights unless user explicitly asks.
 
 ## Setup
-- Provide API token in env vars listed in `skill.json`.
-- Add MCP server and target entries in `skill.json`.
-- Run `npm run butler -- skills sync`.
+- Set `ACCESS_TOKEN` to your Readwise access token.
+- Enable and sync:
+  - `npm run butler -- skills enable readwise`
+  - `npm run butler -- skills sync --target readwise`

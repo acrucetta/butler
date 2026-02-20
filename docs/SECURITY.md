@@ -2,6 +2,7 @@
 
 ## Assets and Boundaries
 - Secrets: `ORCH_GATEWAY_TOKEN`, `ORCH_WORKER_TOKEN`, Telegram bot token.
+- Integration credentials: Readwise `ACCESS_TOKEN`, Google `~/.gog/*` OAuth files.
 - Trusted control plane: `telegram-gateway` and `orchestrator`.
 - Untrusted input: Telegram message bodies and command arguments.
 - Isolated execution boundary: `vm-worker` runtime and optional RPC integration.
@@ -13,6 +14,7 @@
 - API calls between services must be authenticated (`x-api-key` or bearer token).
 - Keep prompt length and rate-limit protections enabled.
 - Keep worker tool policy configured for least privilege by job kind/profile when risky tools are available.
+- Treat copied `~/.gog/` credential directories on droplets as secrets and restrict file permissions to the worker user.
 
 ## Security Review Triggers
 - Any change to authz/authn logic.

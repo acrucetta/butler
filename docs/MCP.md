@@ -55,6 +55,79 @@ npm run butler -- skills sync
 npm run butler -- mcp list
 ```
 
+## Readwise setup (via skills + MCP)
+
+1. Set `ACCESS_TOKEN` in `.env` (and worker runtime environment for production).
+2. Enable + sync:
+
+```bash
+npm run butler -- skills enable readwise
+npm run butler -- skills sync --target readwise
+```
+
+3. Confirm target:
+
+```bash
+npm run butler -- mcp list
+```
+
+Setup wizard shortcut:
+
+```bash
+npm run butler -- setup --skills readwise,gmail --skill-env ACCESS_TOKEN=<token>
+```
+
+## Google Calendar + Gmail setup (OpenClaw `gog` CLI)
+
+Google integrations in this repo follow OpenClaw's Google CLI path (`gog`) instead of MCP wrapper generation.
+
+1. Install `gog` on your worker host.
+2. Authenticate:
+
+```bash
+gog auth login
+gog auth list
+```
+
+3. For headless droplet deployment, perform login on a browser-capable machine and copy `~/.gog/` to the droplet user.
+4. Enable skill context packages:
+
+```bash
+npm run butler -- skills enable gmail
+npm run butler -- skills enable google-calendar
+```
+
+5. Verify commands:
+
+```bash
+gog gmail --query "in:inbox newer_than:7d" --limit 20
+gog cal --days 7
+```
+
+Setup wizard shortcut:
+
+```bash
+npm run butler -- setup --skills gmail,google-calendar
+```
+
+## HEY email setup (bridge pattern)
+
+HEY currently has no stable public API/MCP path. Use HEY forwarding/screening into Gmail and query via `gog gmail`.
+
+1. Forward or screen HEY mail to Gmail with a dedicated label (for example `label:hey`).
+2. Enable skills:
+
+```bash
+npm run butler -- skills enable hey-email
+npm run butler -- skills enable gmail
+```
+
+3. Query bridged HEY mail:
+
+```bash
+gog gmail --query "label:hey is:unread" --limit 25
+```
+
 ## Acceptance criteria
 
 - Running `butler mcp list` shows configured targets.

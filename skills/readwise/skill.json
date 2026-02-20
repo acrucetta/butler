@@ -4,10 +4,26 @@
   "description": "Fetch highlights, notes, and review summaries.",
   "tags": ["readwise", "notes", "highlights", "learning"],
   "env": [
-    "READWISE_API_TOKEN"
+    "ACCESS_TOKEN"
   ],
   "tools": {
-    "mcpServers": {},
-    "targets": []
+    "mcpServers": {
+      "readwise": {
+        "description": "Official Readwise MCP server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@readwise/readwise-mcp"
+        ]
+      }
+    },
+    "targets": [
+      {
+        "name": "readwise",
+        "selector": "readwise",
+        "emitTypes": true,
+        "timeoutMs": 120000
+      }
+    ]
   }
 }

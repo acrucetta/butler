@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import readline from "node:readline";
 import { Command } from "commander";
@@ -34,6 +35,7 @@ const DEFAULT_MCP_TYPES_DIR = ".data/mcp/types";
 const DEFAULT_MCP_BIN_DIR = ".data/mcp/bin";
 const DEFAULT_TOOL_POLICY_SOURCE_PATH = "config/tool-policy.example.json";
 const DEFAULT_TOOL_POLICY_OUTPUT_PATH = ".data/worker/tool-policy.json";
+const SETUP_PREBUILT_SKILLS = ["readwise", "gmail", "google-calendar", "hey-email"];
 
 export async function runButlerCli(options = {}) {
   const cliName = options.cliName ?? "butler";
@@ -50,11 +52,22 @@ export async function runButlerCli(options = {}) {
     .description("Interactive setup wizard for Telegram and local .env")
     .argument("[target]", "setup target", "telegram")
     .option("--env-path <path>", "path to env file", ".env")
+    .option("--skills-dir <path>", "skills directory for prebuilt skill onboarding", DEFAULT_SKILLS_DIR)
+    .option("--skills-config-path <path>", "path to skills config file for setup", DEFAULT_SKILLS_CONFIG_PATH)
     .option("--bot-token <value>", "Telegram bot token")
     .option("--owner-ids <value>", "comma-separated Telegram owner IDs")
     .option("--gateway-token <value>", "orchestrator gateway secret (16+ chars)")
     .option("--worker-token <value>", "orchestrator worker secret (16+ chars)")
     .option("--orch-base-url <value>", "orchestrator base URL", "http://127.0.0.1:8787")
+    .option(
+      "--skills <ids>",
+      "comma-separated prebuilt skills to set explicitly (e.g. readwise,gmail); disables other prebuilt skills"
+    )
+    .option("--skill-env <pair>", "skill env key=value pair (repeatable)", collectRepeatableOption, [])
+    .option("--skip-skill-setup", "skip prebuilt skill selection/configuration during setup")
+    .option("--sync-selected-skills", "run skills sync for selected MCP-backed skills during setup")
+    .option("--skip-skill-sync", "skip skill sync prompt/execution during setup")
+    .option("--flow <flow>", "setup flow: quickstart|manual")
     .option("--yes", "non-interactive mode (use provided/current defaults)")
     .option("--skip-doctor", "skip running doctor after writing env")
     .action(async (target, cmdOptions) => {
@@ -189,6 +202,20 @@ export async function runButlerCli(options = {}) {
             }
           });
         }
+      });
+    });
+
+  program
+    .command("tui")
+    .description("Open runtime status TUI")
+    .option("--mode <mode>", "worker mode used for doctor checks: mock|rpc", process.env.PI_EXEC_MODE ?? "mock")
+    .option("--refresh-ms <ms>", "auto-refresh interval in milliseconds", "5000")
+    .action(async (cmdOptions) => {
+      const mode = parseMode(cmdOptions.mode);
+      const refreshMs = parsePositiveInteger(cmdOptions.refreshMs, 5000);
+      await runButlerTui({
+        initialMode: mode,
+        refreshMs: Math.max(1000, refreshMs)
       });
     });
 
@@ -399,63 +426,14 @@ export async function runButlerCli(options = {}) {
     .option("--skip-types", "skip mcporter emit-ts for all targets")
     .action((cmdOptions) => {
       try {
-        const configPath = resolve(process.cwd(), cmdOptions.configPath);
-        const config = loadSkillsConfig(configPath);
-        const discovered = discoverSkills({
-          workspaceRoot: process.cwd(),
-          skillsDir: resolve(process.cwd(), cmdOptions.skillsDir)
-        });
-        const enabled = resolveEnabledSkills(discovered, config);
-
-        const baseSpecPath = resolve(process.cwd(), cmdOptions.mcpSpecPath);
-        const baseSpec = ensureMcpSpecFile(baseSpecPath, false);
-        const baseTargets = validateMcpTargets(baseSpec.targets ?? [], baseSpecPath);
-
-        const mcporterConfigPath = resolve(
-          process.cwd(),
-          cmdOptions.mcporterConfigPath ?? String(baseSpec.mcporterConfigPath ?? DEFAULT_MCPORTER_CONFIG_PATH)
-        );
-        if (!existsSync(mcporterConfigPath)) {
-          console.error(`skills sync: missing mcporter config at ${mcporterConfigPath}`);
-          process.exitCode = 1;
-          return;
-        }
-
-        const baseMcporter = JSON.parse(readFileSync(mcporterConfigPath, "utf8"));
-        const merged = mergeEnabledSkillsIntoMcp({
-          baseMcporter,
-          baseTargets,
-          enabledSkills: enabled
-        });
-
-        const outputDir = resolve(process.cwd(), cmdOptions.outputDir);
-        mkdirSync(outputDir, { recursive: true });
-        const generatedMcporterPath = resolve(outputDir, "mcporter.generated.json");
-        const generatedSpecPath = resolve(outputDir, "mcp-clis.generated.json");
-
-        writeFileSync(generatedMcporterPath, `${JSON.stringify(merged.mcporter, null, 2)}\n`, "utf8");
-        writeFileSync(
-          generatedSpecPath,
-          `${JSON.stringify(
-            {
-              ...baseSpec,
-              mcporterConfigPath: generatedMcporterPath,
-              targets: merged.targets
-            },
-            null,
-            2
-          )}\n`,
-          "utf8"
-        );
-
-        console.log(
-          `skills sync: ${discovered.length} discovered, ${enabled.length} enabled, ${merged.targets.length} merged targets`
-        );
-        console.log(`skills sync: generated ${generatedMcporterPath}`);
-        console.log(`skills sync: generated ${generatedSpecPath}`);
-
-        syncMcpTargets({
-          specPath: generatedSpecPath,
+        runSkillsSync({
+          configPath: resolve(process.cwd(), cmdOptions.configPath),
+          skillsDir: resolve(process.cwd(), cmdOptions.skillsDir),
+          mcpSpecPath: resolve(process.cwd(), cmdOptions.mcpSpecPath),
+          mcporterConfigPath: cmdOptions.mcporterConfigPath
+            ? resolve(process.cwd(), cmdOptions.mcporterConfigPath)
+            : undefined,
+          outputDir: resolve(process.cwd(), cmdOptions.outputDir),
           targetNames: cmdOptions.target ?? [],
           dryRun: Boolean(cmdOptions.dryRun),
           skipTypes: Boolean(cmdOptions.skipTypes)
@@ -577,10 +555,278 @@ export async function runButlerCli(options = {}) {
   await program.parseAsync(process.argv);
 }
 
+async function runButlerTui({ initialMode, refreshMs }) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error("tui: requires an interactive TTY terminal");
+    process.exitCode = 1;
+    return;
+  }
+
+  const [{ render, Box, Text, useApp, useInput }, ReactModule] = await Promise.all([import("ink"), import("react")]);
+  const React = ReactModule.default ?? ReactModule;
+  const { useCallback, useEffect, useState } = ReactModule;
+
+  function ButlerTuiApp() {
+    const { exit } = useApp();
+    const [mode, setMode] = useState(initialMode);
+    const [snapshot, setSnapshot] = useState(() => collectTuiSnapshot(initialMode));
+    const [showIssues, setShowIssues] = useState(false);
+    const [notice, setNotice] = useState("");
+
+    const refresh = useCallback(
+      (nextMode = mode) => {
+        setSnapshot(collectTuiSnapshot(nextMode));
+      },
+      [mode]
+    );
+
+    useEffect(() => {
+      const timer = setInterval(() => refresh(), refreshMs);
+      return () => clearInterval(timer);
+    }, [refresh]);
+
+    useInput((input, key) => {
+      if (key.ctrl && key.name === "c") {
+        exit();
+        return;
+      }
+      if (input === "q" || key.escape) {
+        exit();
+        return;
+      }
+      if (input === "r") {
+        refresh();
+        setNotice("refreshed");
+        return;
+      }
+      if (input === "m") {
+        const nextMode = mode === "mock" ? "rpc" : "mock";
+        setMode(nextMode);
+        refresh(nextMode);
+        setNotice(`mode=${nextMode}`);
+        return;
+      }
+      if (input === "i") {
+        setShowIssues((value) => !value);
+      }
+    });
+
+    const doctorColor = snapshot.issues.length === 0 ? "green" : "yellow";
+    const skillColor = snapshot.missingSkillEnv.length === 0 ? "green" : "yellow";
+    const mcpColor = snapshot.mcpTargets > 0 ? "green" : "yellow";
+
+    return React.createElement(
+      Box,
+      { flexDirection: "column", paddingX: 1, paddingY: 1 },
+      React.createElement(Text, { color: "cyan", bold: true }, "Butler TUI (Ink MVP)"),
+      React.createElement(Text, null, `Mode: ${mode} (press 'm' to toggle)`),
+      React.createElement(Text, null, `Last refresh: ${snapshot.refreshedAt}`),
+      React.createElement(Text, { color: doctorColor }, `Doctor: ${snapshot.issues.length === 0 ? "ok" : `${snapshot.issues.length} issue(s)`}`),
+      React.createElement(
+        Text,
+        { color: skillColor },
+        `Skills: ${snapshot.enabledSkills}/${snapshot.totalSkills} enabled, missing env=${snapshot.missingSkillEnv.length}`
+      ),
+      React.createElement(
+        Text,
+        { color: mcpColor },
+        `MCP: targets=${snapshot.mcpTargets}, wrappers=${snapshot.mcpWrappers}, config=${snapshot.mcpConfigStatus}`
+      ),
+      React.createElement(Text, null, "Quick commands:"),
+      React.createElement(Text, { color: "gray" }, `  npm run butler -- doctor --mode ${mode}`),
+      React.createElement(Text, { color: "gray" }, `  npm run butler -- up --mode ${mode}`),
+      React.createElement(Text, { color: "gray" }, "  npm run butler -- skills list"),
+      React.createElement(Text, { color: "gray" }, "  npm run butler -- mcp list"),
+      showIssues && snapshot.issues.length > 0
+        ? React.createElement(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            React.createElement(Text, { color: "yellow" }, "Doctor issues:"),
+            ...snapshot.issues.slice(0, 8).map((issue, index) =>
+              React.createElement(Text, { key: `issue-${index}`, color: "yellow" }, `- ${issue}`)
+            )
+          )
+        : null,
+      showIssues && snapshot.missingSkillEnv.length > 0
+        ? React.createElement(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            React.createElement(Text, { color: "yellow" }, "Missing skill env:"),
+            ...snapshot.missingSkillEnv.slice(0, 8).map((entry, index) =>
+              React.createElement(Text, { key: `env-${index}`, color: "yellow" }, `- ${entry}`)
+            )
+          )
+        : null,
+      React.createElement(
+        Text,
+        { color: "gray" },
+        "Keys: r refresh | m mode | i toggle details | q quit"
+      ),
+      notice ? React.createElement(Text, { color: "gray" }, `Last action: ${notice}`) : null
+    );
+  }
+
+  const app = render(React.createElement(ButlerTuiApp), { exitOnCtrlC: false });
+  await app.waitUntilExit();
+}
+
+function collectTuiSnapshot(mode) {
+  const issues = runDoctor({
+    mode,
+    includeGateway: true,
+    includeWorker: true,
+    includeOrchestrator: true,
+    strict: false
+  });
+
+  const skillsDir = resolve(process.cwd(), DEFAULT_SKILLS_DIR);
+  const skillsConfigPath = resolve(process.cwd(), DEFAULT_SKILLS_CONFIG_PATH);
+  const discovered = discoverSkills({
+    workspaceRoot: process.cwd(),
+    skillsDir
+  });
+  const config = loadSkillsConfig(skillsConfigPath);
+  const enabled = resolveEnabledSkills(discovered, config);
+  const envSources = {
+    ...readEnvMap(resolve(process.cwd(), ".env")),
+    ...process.env
+  };
+  const missingSkillEnv = enabled.flatMap((skill) =>
+    (skill.env ?? [])
+      .filter((name) => !String(envSources[name] ?? "").trim())
+      .map((name) => `${skill.id}:${name}`)
+  );
+
+  const mcpSpecPath = resolve(process.cwd(), DEFAULT_MCP_SPEC_PATH);
+  const mcpSpec = readJsonFileSafe(mcpSpecPath);
+  const mcpTargets = Array.isArray(mcpSpec?.targets) ? mcpSpec.targets.length : 0;
+
+  const mcpBinDir = resolve(process.cwd(), DEFAULT_MCP_BIN_DIR);
+  const mcpWrappers = countExecutableEntries(mcpBinDir);
+
+  return {
+    issues,
+    totalSkills: discovered.length,
+    enabledSkills: enabled.length,
+    missingSkillEnv,
+    mcpTargets,
+    mcpWrappers,
+    mcpConfigStatus: existsSync(mcpSpecPath) ? "present" : "missing",
+    refreshedAt: new Date().toISOString()
+  };
+}
+
+function readJsonFileSafe(path) {
+  if (!existsSync(path)) {
+    return null;
+  }
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function countExecutableEntries(dirPath) {
+  if (!existsSync(dirPath)) {
+    return 0;
+  }
+
+  try {
+    return readdirSync(dirPath).reduce((count, name) => {
+      const candidate = resolve(dirPath, name);
+      try {
+        const stats = statSync(candidate);
+        if (!stats.isFile()) {
+          return count;
+        }
+        return count + 1;
+      } catch {
+        return count;
+      }
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
 async function runSetupTelegram(cmdOptions, cliName) {
   const envFilePath = resolve(process.cwd(), cmdOptions.envPath);
-  const fileVars = readEnvMap(envFilePath);
+  let fileVars = readEnvMap(envFilePath);
   const interactive = process.stdin.isTTY && !Boolean(cmdOptions.yes);
+  const skillsDir = resolve(process.cwd(), cmdOptions.skillsDir ?? DEFAULT_SKILLS_DIR);
+  const skillsConfigPath = resolve(process.cwd(), cmdOptions.skillsConfigPath ?? DEFAULT_SKILLS_CONFIG_PATH);
+  const requestedFlow = normalizeSetupFlow(cmdOptions.flow);
+  if (cmdOptions.flow && !requestedFlow) {
+    console.error(`setup: invalid --flow '${cmdOptions.flow}'. Expected 'quickstart' or 'manual'.`);
+    process.exitCode = 1;
+    return;
+  }
+  let selectedFlow = requestedFlow ?? "manual";
+  let prompter = null;
+
+  try {
+    if (interactive) {
+      prompter = await createSetupPrompter();
+      await prompter.intro("Butler setup");
+
+      if (!normalizeSetupFlow(cmdOptions.flow)) {
+        selectedFlow = await prompter.select({
+          message: "Setup flow",
+          initialValue: "quickstart",
+          options: [
+            { value: "quickstart", label: "Quickstart", hint: "Minimum prompts + defaults" },
+            { value: "manual", label: "Manual", hint: "Configure all key fields" }
+          ]
+        });
+      }
+
+      const hasExistingConfig = existsSync(envFilePath) || existsSync(skillsConfigPath);
+      if (hasExistingConfig) {
+        const existingAction = await prompter.select({
+          message: "Existing config detected. How should setup proceed?",
+          initialValue: "modify",
+          options: [
+            { value: "keep", label: "Keep current config and exit" },
+            { value: "modify", label: "Modify current config" },
+            { value: "reset", label: "Reset setup values and re-run onboarding" }
+          ]
+        });
+
+        if (existingAction === "keep") {
+          await prompter.outro("Setup unchanged.");
+          return;
+        }
+        if (existingAction === "reset") {
+          fileVars = {};
+        }
+      }
+    }
+  } catch (error) {
+    if (error instanceof SetupCancelledError) {
+      console.error("setup: canceled");
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
+
+  let explicitSkillEnv = {};
+  try {
+    explicitSkillEnv = parseKeyValuePairs(cmdOptions.skillEnv ?? []);
+  } catch (error) {
+    console.error(`setup: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+    return;
+  }
+  let explicitPrebuiltSkills = [];
+  try {
+    explicitPrebuiltSkills = parseSkillList(cmdOptions.skills);
+  } catch (error) {
+    console.error(`setup: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+    return;
+  }
 
   const values = {
     ORCH_GATEWAY_TOKEN: coalesce(cmdOptions.gatewayToken, process.env.ORCH_GATEWAY_TOKEN, fileVars.ORCH_GATEWAY_TOKEN),
@@ -597,42 +843,58 @@ async function runSetupTelegram(cmdOptions, cliName) {
     values.ORCH_WORKER_TOKEN = generateSecret();
   }
 
-  if (interactive) {
-    console.log("Telegram setup wizard");
-    console.log("1) Create bot token with @BotFather (/newbot)");
-    console.log("2) Collect your Telegram user id");
-    console.log("3) Save .env and run doctor");
-    console.log("");
+  try {
+    if (interactive && prompter) {
+      await prompter.note(
+        [
+          "Step 1/3: Telegram access",
+          "Create bot token with @BotFather (/newbot), then provide owner Telegram IDs."
+        ].join("\n"),
+        "Telegram"
+      );
 
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
+      values.TELEGRAM_BOT_TOKEN = await prompter.text({
+        message: "TELEGRAM_BOT_TOKEN",
+        initialValue: values.TELEGRAM_BOT_TOKEN,
+        required: true
+      });
+      values.TG_OWNER_IDS = await prompter.text({
+        message: "TG_OWNER_IDS (comma-separated Telegram user IDs)",
+        initialValue: values.TG_OWNER_IDS,
+        required: true
+      });
 
-    try {
-      values.TELEGRAM_BOT_TOKEN = await promptForValue(rl, "TELEGRAM_BOT_TOKEN", values.TELEGRAM_BOT_TOKEN, true);
-      values.TG_OWNER_IDS = await promptForValue(
-        rl,
-        "TG_OWNER_IDS (comma-separated Telegram user IDs)",
-        values.TG_OWNER_IDS,
-        true
-      );
-      values.ORCH_GATEWAY_TOKEN = await promptForValue(
-        rl,
-        "ORCH_GATEWAY_TOKEN (16+ chars)",
-        values.ORCH_GATEWAY_TOKEN,
-        true
-      );
-      values.ORCH_WORKER_TOKEN = await promptForValue(
-        rl,
-        "ORCH_WORKER_TOKEN (16+ chars)",
-        values.ORCH_WORKER_TOKEN,
-        true
-      );
-      values.ORCH_BASE_URL = await promptForValue(rl, "ORCH_BASE_URL", values.ORCH_BASE_URL, false);
-    } finally {
-      rl.close();
+      if (selectedFlow === "manual") {
+        await prompter.note("Step 2/3: Runtime secrets and endpoint", "Runtime");
+        values.ORCH_GATEWAY_TOKEN = await prompter.text({
+          message: "ORCH_GATEWAY_TOKEN (16+ chars)",
+          initialValue: values.ORCH_GATEWAY_TOKEN,
+          required: true
+        });
+        values.ORCH_WORKER_TOKEN = await prompter.text({
+          message: "ORCH_WORKER_TOKEN (16+ chars)",
+          initialValue: values.ORCH_WORKER_TOKEN,
+          required: true
+        });
+        values.ORCH_BASE_URL = await prompter.text({
+          message: "ORCH_BASE_URL",
+          initialValue: values.ORCH_BASE_URL,
+          required: false
+        });
+      } else {
+        await prompter.note(
+          "Step 2/3: Quickstart selected. Using generated/default runtime values.",
+          "Runtime"
+        );
+      }
     }
+  } catch (error) {
+    if (error instanceof SetupCancelledError) {
+      console.error("setup: canceled");
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
   }
 
   const setupIssues = validateSetupValues(values);
@@ -645,12 +907,34 @@ async function runSetupTelegram(cmdOptions, cliName) {
     return;
   }
 
+  let skillSetup;
+  try {
+    skillSetup = await runSetupSkillOnboarding({
+      interactive,
+      prompter,
+      skipSkillSetup: Boolean(cmdOptions.skipSkillSetup),
+      skillsDir,
+      skillsConfigPath,
+      explicitPrebuiltSkills,
+      explicitEnv: explicitSkillEnv,
+      envSources: {
+        ...fileVars,
+        ...process.env
+      }
+    });
+  } catch (error) {
+    console.error(`setup: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+    return;
+  }
+
   upsertEnvFile(envFilePath, {
     ORCH_GATEWAY_TOKEN: values.ORCH_GATEWAY_TOKEN,
     ORCH_WORKER_TOKEN: values.ORCH_WORKER_TOKEN,
     TELEGRAM_BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
     TG_OWNER_IDS: values.TG_OWNER_IDS,
-    ORCH_BASE_URL: values.ORCH_BASE_URL
+    ORCH_BASE_URL: values.ORCH_BASE_URL,
+    ...skillSetup.envUpdates
   });
 
   console.log(`setup: wrote ${envFilePath}`);
@@ -659,6 +943,25 @@ async function runSetupTelegram(cmdOptions, cliName) {
   console.log(`- TELEGRAM_BOT_TOKEN=${maskSecret(values.TELEGRAM_BOT_TOKEN)}`);
   console.log(`- TG_OWNER_IDS=${values.TG_OWNER_IDS}`);
   console.log(`- ORCH_BASE_URL=${values.ORCH_BASE_URL}`);
+  if (skillSetup.enabledPrebuilt.length > 0) {
+    console.log(`- PREBUILT_SKILLS_ENABLED=${skillSetup.enabledPrebuilt.join(",")}`);
+  }
+  for (const key of Object.keys(skillSetup.envUpdates).sort((left, right) => left.localeCompare(right))) {
+    console.log(`- ${key}=${maskSecret(String(skillSetup.envUpdates[key] ?? ""))}`);
+  }
+  if (skillSetup.missingEnv.length > 0) {
+    console.error("setup: selected skills missing required env vars");
+    for (const entry of skillSetup.missingEnv) {
+      console.error(`- ${entry}`);
+    }
+    console.error("Use --skill-env KEY=VALUE or run `npm run butler -- skills setup <id>` after setup.");
+  }
+  if (skillSetup.credentialWarnings.length > 0) {
+    console.error("setup: selected skills require additional credential setup");
+    for (const entry of skillSetup.credentialWarnings) {
+      console.error(`- ${entry}`);
+    }
+  }
 
   dotenv.config({ path: envFilePath, override: true });
 
@@ -681,10 +984,349 @@ async function runSetupTelegram(cmdOptions, cliName) {
     }
   }
 
+  const canSyncSelectedSkills = skillSetup.targetNames.length > 0 && !Boolean(cmdOptions.skipSkillSync);
+  let shouldSyncSelectedSkills = canSyncSelectedSkills && Boolean(cmdOptions.syncSelectedSkills);
+  if (canSyncSelectedSkills && interactive && !Boolean(cmdOptions.syncSelectedSkills) && prompter) {
+    try {
+      shouldSyncSelectedSkills = await prompter.confirm({
+        message: `Run skills sync now for selected MCP-backed skills (${skillSetup.targetNames.join(", ")})?`,
+        initialValue: true
+      });
+    } catch (error) {
+      if (error instanceof SetupCancelledError) {
+        console.error("setup: canceled");
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  }
+
+  if (shouldSyncSelectedSkills) {
+    try {
+      runSkillsSync({
+        configPath: skillsConfigPath,
+        skillsDir,
+        mcpSpecPath: resolve(process.cwd(), DEFAULT_MCP_SPEC_PATH),
+        mcporterConfigPath: undefined,
+        outputDir: resolve(process.cwd(), DEFAULT_SKILLS_OUTPUT_DIR),
+        targetNames: skillSetup.targetNames,
+        dryRun: false,
+        skipTypes: false
+      });
+    } catch (error) {
+      console.error(`setup: skills sync failed (${error instanceof Error ? error.message : String(error)})`);
+      console.error("Continue with setup and run `npm run butler -- skills sync` later.");
+    }
+  }
+
   console.log("");
   console.log(`Next steps:`);
   console.log(`- npm run ${cliName} -- up --mode mock`);
   console.log(`- npm run ${cliName} -- up --mode rpc`);
+  if (interactive && prompter) {
+    await prompter.outro("Butler setup complete.");
+  }
+}
+
+async function runSetupSkillOnboarding(options) {
+  const discovered = discoverSkills({
+    workspaceRoot: process.cwd(),
+    skillsDir: options.skillsDir
+  });
+  const skillById = new Map(discovered.map((skill) => [skill.id, skill]));
+  const prebuiltSkillIds = SETUP_PREBUILT_SKILLS.filter((id) => skillById.has(id));
+  const config = loadSkillsConfig(options.skillsConfigPath);
+  const enabled = new Set((config.enabledSkills ?? []).map((id) => normalizeSkillId(id)));
+  const managedSkills = new Set(prebuiltSkillIds);
+  const envUpdates = {};
+  const explicitEnv = options.explicitEnv ?? {};
+
+  const explicitPrebuilt = new Set((options.explicitPrebuiltSkills ?? []).map((id) => normalizeSkillId(id)).filter(Boolean));
+  if (explicitPrebuilt.size > 0) {
+    for (const skillId of explicitPrebuilt) {
+      if (!SETUP_PREBUILT_SKILLS.includes(skillId)) {
+        throw new Error(`'${skillId}' is not a prebuilt setup skill`);
+      }
+      if (!skillById.has(skillId)) {
+        throw new Error(`prebuilt skill '${skillId}' is not available in ${options.skillsDir}`);
+      }
+    }
+    for (const prebuiltId of prebuiltSkillIds) {
+      if (explicitPrebuilt.has(prebuiltId)) {
+        enabled.add(prebuiltId);
+      } else {
+        enabled.delete(prebuiltId);
+      }
+    }
+  }
+
+  if (options.interactive && !options.skipSkillSetup && prebuiltSkillIds.length > 0) {
+    let selectedIds;
+    if (options.prompter) {
+      selectedIds = await options.prompter.multiselect({
+        message: "Step 3/3: Select prebuilt skills",
+        initialValues: prebuiltSkillIds.filter((id) => enabled.has(id)),
+        options: prebuiltSkillIds
+          .map((id) => skillById.get(id))
+          .filter(Boolean)
+          .map((skill) => ({
+            value: skill.id,
+            label: skill.name && skill.name !== skill.id ? `${skill.name} (${skill.id})` : skill.id,
+            hint: Array.isArray(skill.env) && skill.env.length > 0 ? `requires: ${skill.env.join(", ")}` : "no env required"
+          }))
+      });
+    } else {
+      console.log("");
+      console.log("Prebuilt skills setup");
+      console.log("Use arrow keys and spacebar to select skills, then press Enter.");
+      selectedIds = await promptForSkillMultiSelect({
+        title: "Select prebuilt skills",
+        skills: prebuiltSkillIds.map((id) => skillById.get(id)).filter(Boolean),
+        initialSelected: prebuiltSkillIds.filter((id) => enabled.has(id))
+      });
+    }
+
+    for (const prebuiltId of prebuiltSkillIds) {
+      if (selectedIds.includes(prebuiltId)) {
+        enabled.add(prebuiltId);
+      } else {
+        enabled.delete(prebuiltId);
+      }
+    }
+
+    const selectedForConfig = Array.from(managedSkills)
+      .filter((id) => enabled.has(id))
+      .sort((left, right) => left.localeCompare(right));
+    for (const skillId of selectedForConfig) {
+      const skill = skillById.get(skillId);
+      if (!skill || !Array.isArray(skill.env) || skill.env.length === 0) {
+        continue;
+      }
+      for (const key of skill.env) {
+        const explicitValue = explicitEnv[key];
+        if (typeof explicitValue === "string") {
+          envUpdates[key] = explicitValue;
+          continue;
+        }
+        const current = coalesce(String(envUpdates[key] ?? ""), process.env[key], options.envSources[key]);
+        if (options.prompter) {
+          envUpdates[key] = await options.prompter.text({
+            message: `${skillId}:${key}`,
+            initialValue: current,
+            required: true
+          });
+        } else {
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+          });
+          try {
+            envUpdates[key] = await promptForValue(rl, `${skillId}:${key}`, current, true);
+          } finally {
+            rl.close();
+          }
+        }
+      }
+    }
+  }
+
+  const selectedForConfig = Array.from(managedSkills)
+    .filter((id) => enabled.has(id))
+    .sort((left, right) => left.localeCompare(right));
+  const credentialWarnings = [];
+
+  if (selectedForConfig.some((id) => id === "gmail" || id === "google-calendar")) {
+    const googleCredentialResult = await runGoogleCredentialOnboarding({
+      interactive: Boolean(options.interactive),
+      prompter: options.prompter
+    });
+    credentialWarnings.push(...googleCredentialResult.warnings);
+    if (googleCredentialResult.account) {
+      envUpdates.GOG_ACCOUNT = googleCredentialResult.account;
+    }
+  }
+
+  const missingEnv = [];
+  for (const skillId of selectedForConfig) {
+    const skill = skillById.get(skillId);
+    if (!skill || !Array.isArray(skill.env) || skill.env.length === 0) {
+      continue;
+    }
+    for (const key of skill.env) {
+      if (Object.prototype.hasOwnProperty.call(envUpdates, key)) {
+        continue;
+      }
+      const explicitValue = explicitEnv[key];
+      if (typeof explicitValue === "string") {
+        envUpdates[key] = explicitValue;
+        continue;
+      }
+      const current = coalesce(process.env[key], options.envSources[key]);
+      if (current.length > 0) {
+        envUpdates[key] = current;
+        continue;
+      }
+      missingEnv.push(`${skillId}:${key}`);
+    }
+  }
+
+  const normalizedEnabled = Array.from(enabled)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  saveSkillsConfig(options.skillsConfigPath, {
+    ...config,
+    enabledSkills: normalizedEnabled
+  });
+
+  const enabledPrebuilt = prebuiltSkillIds.filter((id) => enabled.has(id));
+  const targetNames = Array.from(
+    new Set(
+      selectedForConfig.flatMap((skillId) => {
+        const skill = skillById.get(skillId);
+        if (!skill || !skill.tools || !Array.isArray(skill.tools.targets)) {
+          return [];
+        }
+        return skill.tools.targets.map((target) => target?.name).filter((name) => typeof name === "string");
+      })
+    )
+  ).sort((left, right) => left.localeCompare(right));
+
+  return {
+    enabledPrebuilt,
+    envUpdates,
+    missingEnv,
+    credentialWarnings,
+    targetNames
+  };
+}
+
+async function runGoogleCredentialOnboarding(options) {
+  const warnings = [];
+
+  if (!isCommandAvailable("gog")) {
+    warnings.push("Google skills selected but `gog` is not installed on this host.");
+    warnings.push("Install `gog`, run `gog auth login`, then verify with `gog auth list`.");
+    return {
+      warnings,
+      account: ""
+    };
+  }
+
+  let credentialStatus = getGogCredentialStatus();
+  if (!credentialStatus.hasCredentials && options.interactive && options.prompter) {
+    await options.prompter.note(
+      [
+        "No gog OAuth client credentials were found.",
+        "",
+        "To get them:",
+        "1) Google Cloud Console -> APIs & Services -> Credentials",
+        "2) Create credentials -> OAuth client ID -> Desktop app",
+        "3) Enable Gmail API + Google Calendar API",
+        "4) Download credentials JSON"
+      ].join("\n"),
+      "Google OAuth credentials"
+    );
+
+    const setCredentialsNow = await options.prompter.confirm({
+      message: "Set gog OAuth credentials now from a credentials.json file?",
+      initialValue: true
+    });
+
+    if (setCredentialsNow) {
+      const credentialsPathInput = await options.prompter.text({
+        message: "Path to credentials.json",
+        initialValue: "~/Downloads/credentials.json",
+        required: true
+      });
+      const credentialsPath = expandHomePath(credentialsPathInput);
+      const setCredentials = spawnSync("gog", ["auth", "credentials", "set", credentialsPath], {
+        cwd: process.cwd(),
+        stdio: "inherit"
+      });
+      if (setCredentials.status !== 0) {
+        warnings.push("`gog auth credentials set` did not complete successfully.");
+      }
+      credentialStatus = getGogCredentialStatus();
+    }
+  }
+
+  if (!credentialStatus.hasCredentials) {
+    if (credentialStatus.error) {
+      warnings.push(`Unable to read gog OAuth credentials: ${credentialStatus.error}`);
+    }
+    warnings.push("No gog OAuth client credentials are configured.");
+    warnings.push(
+      "Create a Desktop OAuth client in Google Cloud Console, enable Gmail API + Google Calendar API, then run `gog auth credentials set /path/to/credentials.json`."
+    );
+    return {
+      warnings,
+      account: ""
+    };
+  }
+
+  let authStatus = listGogAccounts();
+  if (authStatus.accounts.length === 0 && options.interactive && options.prompter) {
+    await options.prompter.note(
+      [
+        "Google skills selected.",
+        "No `gog` account was detected yet.",
+        "Setup can launch `gog auth login` now."
+      ].join("\n"),
+      "Google credentials"
+    );
+
+    const runLogin = await options.prompter.confirm({
+      message: "Run `gog auth login` now?",
+      initialValue: true
+    });
+
+    if (runLogin) {
+      const login = spawnSync("gog", ["auth", "login"], {
+        cwd: process.cwd(),
+        stdio: "inherit"
+      });
+      if (login.status !== 0) {
+        warnings.push("`gog auth login` did not complete successfully.");
+      }
+      authStatus = listGogAccounts();
+    }
+  }
+
+  if (authStatus.accounts.length === 0) {
+    if (authStatus.error) {
+      warnings.push(`Unable to read gog accounts: ${authStatus.error}`);
+    }
+    warnings.push("No Google account found in `gog auth list`.");
+    warnings.push("Complete auth with `gog auth login` (or copy `~/.gog/` for headless deployments).");
+    return {
+      warnings,
+      account: ""
+    };
+  }
+
+  let account = "";
+  if (options.interactive && options.prompter) {
+    const defaultAccount = authStatus.accounts[0] ?? "";
+    const useAccountPin = await options.prompter.confirm({
+      message: `Pin a default gog account in .env (GOG_ACCOUNT)?`,
+      initialValue: true
+    });
+    if (useAccountPin) {
+      account = await options.prompter.text({
+        message: "GOG_ACCOUNT",
+        initialValue: defaultAccount,
+        required: true
+      });
+    }
+  } else {
+    account = authStatus.accounts[0] ?? "";
+  }
+
+  return {
+    warnings,
+    account
+  };
 }
 
 function ensureMcpSpecFile(specPath, overwriteIfMissing) {
@@ -785,6 +1427,71 @@ function validateMcpTargets(rawTargets, specPath) {
   return targets;
 }
 
+function runSkillsSync({
+  configPath,
+  skillsDir,
+  mcpSpecPath,
+  mcporterConfigPath,
+  outputDir,
+  targetNames,
+  dryRun,
+  skipTypes
+}) {
+  const config = loadSkillsConfig(configPath);
+  const discovered = discoverSkills({
+    workspaceRoot: process.cwd(),
+    skillsDir
+  });
+  const enabled = resolveEnabledSkills(discovered, config);
+
+  const baseSpec = ensureMcpSpecFile(mcpSpecPath, false);
+  const baseTargets = validateMcpTargets(baseSpec.targets ?? [], mcpSpecPath);
+  const resolvedMcporterConfigPath = resolve(
+    process.cwd(),
+    mcporterConfigPath ?? String(baseSpec.mcporterConfigPath ?? DEFAULT_MCPORTER_CONFIG_PATH)
+  );
+  if (!existsSync(resolvedMcporterConfigPath)) {
+    throw new Error(`missing mcporter config at ${resolvedMcporterConfigPath}`);
+  }
+
+  const baseMcporter = JSON.parse(readFileSync(resolvedMcporterConfigPath, "utf8"));
+  const merged = mergeEnabledSkillsIntoMcp({
+    baseMcporter,
+    baseTargets,
+    enabledSkills: enabled
+  });
+
+  mkdirSync(outputDir, { recursive: true });
+  const generatedMcporterPath = resolve(outputDir, "mcporter.generated.json");
+  const generatedSpecPath = resolve(outputDir, "mcp-clis.generated.json");
+
+  writeFileSync(generatedMcporterPath, `${JSON.stringify(merged.mcporter, null, 2)}\n`, "utf8");
+  writeFileSync(
+    generatedSpecPath,
+    `${JSON.stringify(
+      {
+        ...baseSpec,
+        mcporterConfigPath: generatedMcporterPath,
+        targets: merged.targets
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  console.log(`skills sync: ${discovered.length} discovered, ${enabled.length} enabled, ${merged.targets.length} merged targets`);
+  console.log(`skills sync: generated ${generatedMcporterPath}`);
+  console.log(`skills sync: generated ${generatedSpecPath}`);
+
+  syncMcpTargets({
+    specPath: generatedSpecPath,
+    targetNames: targetNames ?? [],
+    dryRun: Boolean(dryRun),
+    skipTypes: Boolean(skipTypes)
+  });
+}
+
 function syncMcpTargets({ specPath, targetNames, dryRun, skipTypes }) {
   const spec = ensureMcpSpecFile(specPath, false);
   const selectedNames = new Set(targetNames ?? []);
@@ -882,6 +1589,20 @@ function parseKeyValuePairs(pairs) {
   return parsed;
 }
 
+function parseSkillList(raw) {
+  if (raw === undefined || raw === null) {
+    return [];
+  }
+  if (typeof raw !== "string") {
+    throw new Error("invalid --skills value");
+  }
+  const ids = raw
+    .split(",")
+    .map((value) => normalizeSkillId(value))
+    .filter(Boolean);
+  return Array.from(new Set(ids));
+}
+
 function normalizeSkillId(value) {
   return String(value).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
 }
@@ -966,6 +1687,123 @@ function prependPathEntry(entry, currentPath) {
   return [entry, ...values].join(delimiter);
 }
 
+function isCommandAvailable(command) {
+  const check = spawnSync("bash", ["-lc", `command -v ${shellEscape(command)} >/dev/null 2>&1`], {
+    cwd: process.cwd()
+  });
+  return check.status === 0;
+}
+
+function expandHomePath(rawPath) {
+  const value = String(rawPath ?? "").trim();
+  if (!value) {
+    return value;
+  }
+  if (value === "~") {
+    return homedir();
+  }
+  if (value.startsWith("~/")) {
+    return resolve(homedir(), value.slice(2));
+  }
+  return value;
+}
+
+function getGogCredentialStatus() {
+  const result = spawnSync("gog", ["auth", "credentials", "list"], {
+    cwd: process.cwd(),
+    encoding: "utf8"
+  });
+  const stdout = String(result.stdout ?? "");
+  const stderr = String(result.stderr ?? "");
+  const combined = `${stdout}\n${stderr}`;
+  const noCredentials = /No OAuth client credentials stored/i.test(combined);
+
+  return {
+    hasCredentials: result.status === 0 && !noCredentials,
+    error: result.status === 0 ? "" : (stderr.trim() || stdout.trim() || `exit code ${result.status ?? 1}`)
+  };
+}
+
+function listGogAccounts() {
+  const result = spawnSync("gog", ["auth", "list"], {
+    cwd: process.cwd(),
+    encoding: "utf8"
+  });
+  const stdout = String(result.stdout ?? "");
+  const stderr = String(result.stderr ?? "");
+  const combined = `${stdout}\n${stderr}`;
+  const matches = combined.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? [];
+  const accounts = Array.from(new Set(matches.map((value) => value.trim()).filter(Boolean)));
+
+  return {
+    accounts,
+    error: result.status === 0 ? "" : (stderr.trim() || stdout.trim() || `exit code ${result.status ?? 1}`)
+  };
+}
+
+class SetupCancelledError extends Error {
+  constructor(message = "setup canceled") {
+    super(message);
+    this.name = "SetupCancelledError";
+  }
+}
+
+async function createSetupPrompter() {
+  const prompts = await import("@clack/prompts");
+
+  const guard = (value) => {
+    if (prompts.isCancel(value)) {
+      prompts.cancel("Setup canceled.");
+      throw new SetupCancelledError();
+    }
+    return value;
+  };
+
+  return {
+    intro: async (title) => {
+      prompts.intro(title);
+    },
+    outro: async (message) => {
+      prompts.outro(message);
+    },
+    note: async (message, title) => {
+      prompts.note(message, title);
+    },
+    select: async ({ message, options, initialValue }) =>
+      guard(
+        await prompts.select({
+          message,
+          options,
+          initialValue
+        })
+      ),
+    multiselect: async ({ message, options, initialValues }) =>
+      guard(
+        await prompts.multiselect({
+          message,
+          options,
+          initialValues,
+          required: false
+        })
+      ),
+    text: async ({ message, initialValue, required }) =>
+      guard(
+        await prompts.text({
+          message,
+          initialValue,
+          validate: required ? (value) => (String(value ?? "").trim().length === 0 ? "Required" : undefined) : undefined
+        })
+      ),
+    confirm: async ({ message, initialValue }) =>
+      guard(
+        await prompts.confirm({
+          message,
+          initialValue
+        })
+      )
+  };
+}
+
 function promptForValue(rl, label, currentValue, required) {
   return new Promise((resolvePromise) => {
     const suffix = currentValue ? ` [${currentValue}]` : "";
@@ -983,6 +1821,137 @@ function promptForValue(rl, label, currentValue, required) {
       }
       resolvePromise(trimmed || currentValue || "");
     });
+  });
+}
+
+function normalizeSetupFlow(raw) {
+  if (raw === undefined || raw === null || raw === "") {
+    return null;
+  }
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === "quickstart" || normalized === "manual") {
+    return normalized;
+  }
+  return null;
+}
+
+function promptForSkillMultiSelect({ title, skills, initialSelected }) {
+  const ids = Array.isArray(skills) ? skills.map((skill) => skill?.id).filter((id) => typeof id === "string") : [];
+  if (ids.length === 0) {
+    return Promise.resolve([]);
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    const fallback = Array.isArray(initialSelected) ? initialSelected : [];
+    return Promise.resolve(ids.filter((id) => fallback.includes(id)));
+  }
+
+  const selected = new Set(ids.filter((id) => Array.isArray(initialSelected) && initialSelected.includes(id)));
+  let cursor = 0;
+  let renderedLines = 0;
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    const input = process.stdin;
+    const output = process.stdout;
+    const canRaw = typeof input.setRawMode === "function";
+    const wasRaw = canRaw ? Boolean(input.isRaw) : false;
+
+    readline.emitKeypressEvents(input);
+    input.resume();
+    if (canRaw) {
+      input.setRawMode(true);
+    }
+    output.write("\x1b[?25l");
+
+    const render = () => {
+      const lines = [];
+      lines.push(title);
+      lines.push("Use ↑/↓ to move, space to toggle, enter to confirm.");
+      for (let index = 0; index < skills.length; index += 1) {
+        const skill = skills[index];
+        const id = skill.id;
+        const isActive = index === cursor;
+        const isSelected = selected.has(id);
+        const pointer = isActive ? ">" : " ";
+        const marker = isSelected ? "[x]" : "[ ]";
+        const label = skill.name && skill.name !== id ? `${skill.name} (${id})` : id;
+        lines.push(`${pointer} ${marker} ${label}`);
+      }
+
+      if (renderedLines > 0) {
+        output.write(`\x1b[${renderedLines}A`);
+      }
+      for (const line of lines) {
+        output.write("\x1b[2K");
+        output.write(`${line}\n`);
+      }
+      if (renderedLines > lines.length) {
+        for (let index = 0; index < renderedLines - lines.length; index += 1) {
+          output.write("\x1b[2K\n");
+        }
+      }
+      renderedLines = lines.length;
+    };
+
+    const cleanup = () => {
+      input.removeListener("keypress", onKeypress);
+      input.pause();
+      if (canRaw) {
+        input.setRawMode(wasRaw);
+      }
+      output.write("\x1b[?25h");
+    };
+
+    const finish = () => {
+      cleanup();
+      output.write("\x1b[2K");
+      output.write("\n");
+      resolvePromise(ids.filter((id) => selected.has(id)));
+    };
+
+    const cancel = () => {
+      cleanup();
+      output.write("\x1b[2K");
+      output.write("\n");
+      rejectPromise(new Error("setup canceled"));
+    };
+
+    const onKeypress = (_input, key) => {
+      if (!key) {
+        return;
+      }
+      if (key.ctrl && key.name === "c") {
+        cancel();
+        return;
+      }
+      if (key.name === "up") {
+        cursor = (cursor - 1 + skills.length) % skills.length;
+        render();
+        return;
+      }
+      if (key.name === "down") {
+        cursor = (cursor + 1) % skills.length;
+        render();
+        return;
+      }
+      if (key.name === "space") {
+        const skill = skills[cursor];
+        if (skill) {
+          if (selected.has(skill.id)) {
+            selected.delete(skill.id);
+          } else {
+            selected.add(skill.id);
+          }
+        }
+        render();
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        finish();
+      }
+    };
+
+    input.on("keypress", onKeypress);
+    render();
   });
 }
 

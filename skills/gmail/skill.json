@@ -1,13 +1,9 @@
 {
   "id": "gmail",
   "name": "Gmail",
-  "description": "Inbox triage, drafts, and thread search workflows.",
-  "tags": ["gmail", "email", "inbox", "google"],
-  "env": [
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REFRESH_TOKEN"
-  ],
+  "description": "Inbox triage, drafts, and thread search via OpenClaw's gog CLI.",
+  "tags": ["gmail", "email", "inbox", "google", "gog", "openclaw"],
+  "env": [],
   "tools": {
     "mcpServers": {},
     "targets": []

@@ -1,13 +1,9 @@
 {
   "id": "google-calendar",
   "name": "Google Calendar",
-  "description": "Calendar scheduling and event management workflows.",
-  "tags": ["calendar", "meetings", "schedule", "google"],
-  "env": [
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REFRESH_TOKEN"
-  ],
+  "description": "Calendar scheduling and event management via OpenClaw's gog CLI.",
+  "tags": ["calendar", "meetings", "schedule", "google", "gog", "openclaw"],
+  "env": [],
   "tools": {
     "mcpServers": {},
     "targets": []

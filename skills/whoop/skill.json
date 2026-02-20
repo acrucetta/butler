@@ -6,10 +6,30 @@
   "env": [
     "WHOOP_CLIENT_ID",
     "WHOOP_CLIENT_SECRET",
-    "WHOOP_REFRESH_TOKEN"
+    "WHOOP_REDIRECT_URI",
+    "WHOOP_SCOPES"
   ],
   "tools": {
-    "mcpServers": {},
-    "targets": []
+    "mcpServers": {
+      "whoop": {
+        "description": "Whoop MCP server via @alacore/whoop-mcp-server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@alacore/whoop-mcp-server"
+        ],
+        "env": {
+          "WHOOP_SCOPES": "offline read:profile read:body_measurement read:cycles read:recovery read:sleep read:workout"
+        }
+      }
+    },
+    "targets": [
+      {
+        "name": "whoop",
+        "selector": "whoop",
+        "emitTypes": true,
+        "timeoutMs": 120000
+      }
+    ]
   }
 }
