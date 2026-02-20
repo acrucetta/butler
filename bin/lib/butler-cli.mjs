@@ -729,12 +729,6 @@ function defaultMcpSpec() {
         selector: "codex",
         emitTypes: true,
         timeoutMs: 120000
-      },
-      {
-        name: "brave-search",
-        selector: "brave-search",
-        emitTypes: true,
-        timeoutMs: 120000
       }
     ]
   };

@@ -6,14 +6,6 @@
       "args": [
         "mcp-server"
       ]
-    },
-    "brave-search": {
-      "description": "Brave Search MCP server",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-brave-search"
-      ]
     }
   },
   "imports": [

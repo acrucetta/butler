@@ -1,0 +1,29 @@
+{
+  "id": "brave-search",
+  "name": "Brave Search",
+  "description": "Web search and web result retrieval via Brave Search MCP.",
+  "tags": ["search", "web", "research", "brave"],
+  "env": [
+    "BRAVE_API_KEY"
+  ],
+  "tools": {
+    "mcpServers": {
+      "brave-search": {
+        "description": "Brave Search MCP server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-brave-search"
+        ]
+      }
+    },
+    "targets": [
+      {
+        "name": "brave-search",
+        "selector": "brave-search",
+        "emitTypes": true,
+        "timeoutMs": 120000
+      }
+    ]
+  }
+}

@@ -281,7 +281,7 @@ npm run butler -- mcp init
 ```
 
 2. Add MCP servers in `config/mcporter.json` and generation targets in `config/mcp-clis.json`.
-   The repo now includes starter `codex` and `brave-search` targets.
+   The base repo includes starter `codex`; optional integrations should be added via `skills/*`.
 
 3. Generate wrappers:
 
@@ -302,13 +302,14 @@ Generated artifacts default to:
 
 `butler up` and `vm-worker` prepend `.data/mcp/bin` to `PATH` so generated wrappers are available to runtime tools.
 
-### Brave Search MCP
+### Brave Search MCP (via skills)
 
-The `brave-search` target uses `@modelcontextprotocol/server-brave-search`.
-Set `BRAVE_API_KEY` in `.env` (and on your production worker host), then run:
+Brave Search is packaged as `skills/brave-search` and is not part of base MCP targets.
+Enable it, set `BRAVE_API_KEY`, then run:
 
 ```bash
-npm run butler -- mcp sync
+npm run butler -- skills enable brave-search
+npm run butler -- skills sync
 ```
 
 ## Skills (simple local model)

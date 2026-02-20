@@ -36,19 +36,17 @@ The repo needs a first-class path to consume MCP servers and expose them as loca
   - Server config in `config/mcporter.json`
   - CLI target in `config/mcp-clis.json`
   - Selector: `codex`
-- `brave-search` is preconfigured:
-  - Server package: `@modelcontextprotocol/server-brave-search`
-  - CLI target selector: `brave-search`
-  - Requires runtime `BRAVE_API_KEY` in the worker environment
+- `brave-search` is provided as an optional skill package in `skills/brave-search` and merged through `butler skills sync`.
 
 ## Brave Search setup
 
 1. Create a Brave Search API key (Brave "Data for Search" plan).
 2. Set `BRAVE_API_KEY` in your `.env` (and in the worker host environment for production).
-3. Regenerate wrappers:
+3. Enable the skill and regenerate wrappers:
 
 ```bash
-npm run butler -- mcp sync
+npm run butler -- skills enable brave-search
+npm run butler -- skills sync
 ```
 
 4. Confirm targets:
