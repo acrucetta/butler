@@ -36,6 +36,7 @@ flowchart LR
     CLI -. doctor/up .-> GW
     CLI -. doctor/up .-> ORCH
     CLI -. doctor/up .-> WORKER
+    CLI -. tui submit/status/approve/abort .-> ORCH
     CLI -. mcp init/list/sync .-> MCPCFG[config/mcp-clis.json + config/mcporter.json]
     CLI -. mcp sync .-> MCPBIN
     CLI -. skills init/list/add/setup/enable/disable/sync .-> SKDIR
@@ -67,6 +68,7 @@ flowchart TB
 - `vm-worker` selects enabled local skills from `skills/*` and injects skill guidance into job prompt context.
 - `pi` runtime is only invoked by `vm-worker`.
 - `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
+- `butler tui` can submit and monitor test jobs directly against orchestrator using gateway-token auth.
 - In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
 - `packages/contracts` defines request/response schemas shared by gateway, orchestrator, and worker.
 
@@ -193,6 +195,14 @@ The code follows the same boundaries shown above:
 - `POST /v1/proactive/deliveries/:jobId/ack`
 - `GET /v1/tools`
 - `POST /v1/tools/invoke`
+
+### CLI TUI -> Orchestrator
+
+- `POST /v1/jobs`
+- `GET /v1/jobs/:jobId`
+- `GET /v1/jobs/:jobId/events`
+- `POST /v1/jobs/:jobId/approve`
+- `POST /v1/jobs/:jobId/abort`
 
 ### Worker -> Orchestrator
 

@@ -36,6 +36,13 @@ const DEFAULT_MCP_BIN_DIR = ".data/mcp/bin";
 const DEFAULT_TOOL_POLICY_SOURCE_PATH = "config/tool-policy.example.json";
 const DEFAULT_TOOL_POLICY_OUTPUT_PATH = ".data/worker/tool-policy.json";
 const SETUP_PREBUILT_SKILLS = ["readwise", "gmail", "google-calendar", "hey-email"];
+const DEFAULT_TUI_CHAT_ID = "butler-tui-chat";
+const DEFAULT_TUI_REQUESTER_ID = "butler-tui";
+const DEFAULT_TUI_SESSION_KEY = "butler-tui";
+const TUI_EVENT_LOG_LIMIT = 40;
+const TUI_OUTPUT_PREVIEW_CHARS = 900;
+const TUI_EVENT_PREVIEW_CHARS = 180;
+const TUI_JOB_POLL_INTERVAL_MS = 1200;
 
 export async function runButlerCli(options = {}) {
   const cliName = options.cliName ?? "butler";
@@ -210,15 +217,36 @@ export async function runButlerCli(options = {}) {
 
   program
     .command("tui")
-    .description("Open runtime status TUI")
+    .description("Open runtime operator TUI")
     .option("--mode <mode>", "worker mode used for doctor checks: mock|rpc", process.env.PI_EXEC_MODE ?? "mock")
     .option("--refresh-ms <ms>", "auto-refresh interval in milliseconds", "5000")
+    .option("--kind <kind>", "default submit kind: task|run", process.env.BUTLER_TUI_KIND ?? "task")
+    .option("--chat-id <id>", "synthetic chat id for TUI jobs", process.env.BUTLER_TUI_CHAT_ID ?? DEFAULT_TUI_CHAT_ID)
+    .option(
+      "--requester-id <id>",
+      "synthetic requester id for TUI jobs",
+      process.env.BUTLER_TUI_REQUESTER_ID ?? DEFAULT_TUI_REQUESTER_ID
+    )
+    .option(
+      "--session-key <key>",
+      "session key for submitted TUI jobs",
+      process.env.BUTLER_TUI_SESSION_KEY ?? DEFAULT_TUI_SESSION_KEY
+    )
+    .option("--thread-id <id>", "optional thread id for submitted TUI jobs", process.env.BUTLER_TUI_THREAD_ID ?? "")
+    .option("--message <text>", "optional prompt to send immediately after startup")
     .action(async (cmdOptions) => {
       const mode = parseMode(cmdOptions.mode);
       const refreshMs = parsePositiveInteger(cmdOptions.refreshMs, 5000);
+      const initialJobKind = parseTuiJobKind(cmdOptions.kind);
       await runButlerTui({
         initialMode: mode,
-        refreshMs: Math.max(1000, refreshMs)
+        refreshMs: Math.max(1000, refreshMs),
+        initialJobKind,
+        chatId: String(cmdOptions.chatId ?? DEFAULT_TUI_CHAT_ID).trim() || DEFAULT_TUI_CHAT_ID,
+        requesterId: String(cmdOptions.requesterId ?? DEFAULT_TUI_REQUESTER_ID).trim() || DEFAULT_TUI_REQUESTER_ID,
+        sessionKey: String(cmdOptions.sessionKey ?? DEFAULT_TUI_SESSION_KEY).trim() || DEFAULT_TUI_SESSION_KEY,
+        threadId: String(cmdOptions.threadId ?? "").trim() || undefined,
+        initialMessage: String(cmdOptions.message ?? "").trim()
       });
     });
 
@@ -558,7 +586,16 @@ export async function runButlerCli(options = {}) {
   await program.parseAsync(process.argv);
 }
 
-async function runButlerTui({ initialMode, refreshMs }) {
+async function runButlerTui({
+  initialMode,
+  refreshMs,
+  initialJobKind,
+  chatId,
+  requesterId,
+  sessionKey,
+  threadId,
+  initialMessage
+}) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error("tui: requires an interactive TTY terminal");
     process.exitCode = 1;
@@ -567,7 +604,15 @@ async function runButlerTui({ initialMode, refreshMs }) {
 
   const [{ render, Box, Text, useApp, useInput }, ReactModule] = await Promise.all([import("ink"), import("react")]);
   const React = ReactModule.default ?? ReactModule;
-  const { useCallback, useEffect, useState } = ReactModule;
+  const { useCallback, useEffect, useRef, useState } = ReactModule;
+  const remoteContext = {
+    baseUrl: coalesce(process.env.ORCH_BASE_URL, "http://127.0.0.1:8787"),
+    gatewayToken: coalesce(process.env.ORCH_GATEWAY_TOKEN),
+    chatId,
+    requesterId,
+    sessionKey,
+    threadId
+  };
 
   function ButlerTuiApp() {
     const { exit } = useApp();
@@ -575,6 +620,23 @@ async function runButlerTui({ initialMode, refreshMs }) {
     const [snapshot, setSnapshot] = useState(() => collectTuiSnapshot(initialMode));
     const [showIssues, setShowIssues] = useState(false);
     const [notice, setNotice] = useState("");
+    const [jobKind, setJobKind] = useState(initialJobKind);
+    const [composer, setComposer] = useState(initialMessage ?? "");
+    const [isComposing, setIsComposing] = useState(Boolean(initialMessage));
+    const [isMutatingJob, setIsMutatingJob] = useState(false);
+    const [activeJob, setActiveJob] = useState(null);
+    const [eventLog, setEventLog] = useState([]);
+    const pollCursorRef = useRef(0);
+    const pollInFlightRef = useRef(false);
+    const initialMessageSentRef = useRef(false);
+    const remoteReady = remoteContext.gatewayToken.length >= 16;
+
+    const appendEventLog = useCallback((line) => {
+      setEventLog((previous) => {
+        const next = [...previous, line];
+        return next.slice(-TUI_EVENT_LOG_LIMIT);
+      });
+    }, []);
 
     const refresh = useCallback(
       (nextMode = mode) => {
@@ -588,11 +650,263 @@ async function runButlerTui({ initialMode, refreshMs }) {
       return () => clearInterval(timer);
     }, [refresh]);
 
+    const submitPrompt = useCallback(
+      async (rawPrompt) => {
+        const prompt = String(rawPrompt ?? "").trim();
+        if (!prompt) {
+          setNotice("empty prompt");
+          return;
+        }
+        if (!remoteReady) {
+          setNotice("missing ORCH_GATEWAY_TOKEN");
+          appendEventLog(`${formatTuiClock()} submit blocked: ORCH_GATEWAY_TOKEN missing/too short`);
+          return;
+        }
+        if (isMutatingJob) {
+          setNotice("wait: request already in flight");
+          return;
+        }
+
+        setIsMutatingJob(true);
+        try {
+          const job = await tuiCreateJob(remoteContext, {
+            kind: jobKind,
+            prompt
+          });
+          pollCursorRef.current = 0;
+          setActiveJob({
+            id: String(job.id ?? ""),
+            status: String(job.status ?? "queued"),
+            kind: String(job.kind ?? jobKind),
+            requiresApproval: Boolean(job.requiresApproval),
+            resultText: String(job.resultText ?? ""),
+            error: String(job.error ?? ""),
+            updatedAt: String(job.updatedAt ?? new Date().toISOString())
+          });
+          appendEventLog(`${formatTuiClock()} created ${job.id} (${job.status})`);
+          setNotice(`submitted ${job.id}`);
+          refresh();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          appendEventLog(`${formatTuiClock()} submit failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
+          setNotice("submit failed");
+        } finally {
+          setIsMutatingJob(false);
+        }
+      },
+      [appendEventLog, isMutatingJob, jobKind, refresh, remoteReady]
+    );
+
+    const approveActiveJob = useCallback(async () => {
+      if (!activeJob?.id) {
+        setNotice("no active job");
+        return;
+      }
+      if (activeJob.status !== "needs_approval") {
+        setNotice("active job does not need approval");
+        return;
+      }
+      if (!remoteReady) {
+        setNotice("missing ORCH_GATEWAY_TOKEN");
+        return;
+      }
+      if (isMutatingJob) {
+        setNotice("wait: request already in flight");
+        return;
+      }
+
+      setIsMutatingJob(true);
+      try {
+        const job = await tuiApproveJob(remoteContext, activeJob.id);
+        setActiveJob((current) =>
+          current && current.id === activeJob.id
+            ? {
+                ...current,
+                status: String(job.status ?? current.status),
+                requiresApproval: Boolean(job.requiresApproval),
+                updatedAt: String(job.updatedAt ?? current.updatedAt)
+              }
+            : current
+        );
+        appendEventLog(`${formatTuiClock()} approved ${activeJob.id}`);
+        setNotice(`approved ${activeJob.id}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendEventLog(`${formatTuiClock()} approve failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
+        setNotice("approve failed");
+      } finally {
+        setIsMutatingJob(false);
+      }
+    }, [activeJob, appendEventLog, isMutatingJob, remoteReady]);
+
+    const abortActiveJob = useCallback(async () => {
+      if (!activeJob?.id) {
+        setNotice("no active job");
+        return;
+      }
+      if (!remoteReady) {
+        setNotice("missing ORCH_GATEWAY_TOKEN");
+        return;
+      }
+      if (isMutatingJob) {
+        setNotice("wait: request already in flight");
+        return;
+      }
+
+      setIsMutatingJob(true);
+      try {
+        const job = await tuiAbortJob(remoteContext, activeJob.id);
+        setActiveJob((current) =>
+          current && current.id === activeJob.id
+            ? {
+                ...current,
+                status: String(job.status ?? current.status),
+                error: String(job.error ?? current.error ?? ""),
+                updatedAt: String(job.updatedAt ?? current.updatedAt)
+              }
+            : current
+        );
+        appendEventLog(`${formatTuiClock()} abort requested for ${activeJob.id}`);
+        setNotice(`abort requested ${activeJob.id}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendEventLog(`${formatTuiClock()} abort failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
+        setNotice("abort failed");
+      } finally {
+        setIsMutatingJob(false);
+      }
+    }, [activeJob, appendEventLog, isMutatingJob, remoteReady]);
+
+    useEffect(() => {
+      if (!initialMessage || initialMessageSentRef.current) {
+        return;
+      }
+      initialMessageSentRef.current = true;
+      setIsComposing(false);
+      setComposer("");
+      void submitPrompt(initialMessage);
+    }, [initialMessage, submitPrompt]);
+
+    useEffect(() => {
+      if (!activeJob?.id || !remoteReady || isTerminalJobStatus(activeJob.status)) {
+        return;
+      }
+
+      let canceled = false;
+      const poll = async () => {
+        if (canceled || pollInFlightRef.current) {
+          return;
+        }
+        pollInFlightRef.current = true;
+
+        try {
+          const eventsPayload = await tuiGetJobEvents(remoteContext, activeJob.id, pollCursorRef.current);
+          if (canceled) {
+            return;
+          }
+
+          const events = Array.isArray(eventsPayload?.events) ? eventsPayload.events : [];
+          const nextCursor = Number(eventsPayload?.nextCursor);
+          if (Number.isFinite(nextCursor) && nextCursor >= 0) {
+            pollCursorRef.current = Math.floor(nextCursor);
+          }
+
+          if (events.length > 0) {
+            setActiveJob((current) => {
+              if (!current || current.id !== activeJob.id) {
+                return current;
+              }
+              let nextResultText = String(current.resultText ?? "");
+              for (const event of events) {
+                nextResultText += extractAgentDelta(event);
+              }
+              return {
+                ...current,
+                resultText: nextResultText
+              };
+            });
+
+            for (const event of events) {
+              appendEventLog(formatTuiEventLine(event));
+            }
+          }
+
+          const latestJob = await tuiGetJob(remoteContext, activeJob.id);
+          if (canceled) {
+            return;
+          }
+          setActiveJob((current) => {
+            if (!current || current.id !== activeJob.id) {
+              return current;
+            }
+            return {
+              ...current,
+              status: String(latestJob.status ?? current.status),
+              requiresApproval: Boolean(latestJob.requiresApproval),
+              resultText: String(latestJob.resultText ?? current.resultText ?? ""),
+              error: String(latestJob.error ?? current.error ?? ""),
+              updatedAt: String(latestJob.updatedAt ?? current.updatedAt)
+            };
+          });
+
+          if (isTerminalJobStatus(String(latestJob.status ?? ""))) {
+            appendEventLog(`${formatTuiClock()} job ${activeJob.id} ${latestJob.status}`);
+            setNotice(`job ${activeJob.id} ${latestJob.status}`);
+            refresh();
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          appendEventLog(`${formatTuiClock()} poll failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
+          setNotice("poll failed");
+        } finally {
+          pollInFlightRef.current = false;
+        }
+      };
+
+      void poll();
+      const timer = setInterval(() => {
+        void poll();
+      }, TUI_JOB_POLL_INTERVAL_MS);
+
+      return () => {
+        canceled = true;
+        clearInterval(timer);
+      };
+    }, [activeJob?.id, activeJob?.status, appendEventLog, refresh, remoteReady]);
+
     useInput((input, key) => {
       if (key.ctrl && key.name === "c") {
         exit();
         return;
       }
+      if (isComposing) {
+        if (key.escape) {
+          setIsComposing(false);
+          setNotice("compose canceled");
+          return;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          const prompt = composer.trim();
+          if (!prompt) {
+            setIsComposing(false);
+            setNotice("empty prompt");
+            return;
+          }
+          setIsComposing(false);
+          setComposer("");
+          void submitPrompt(prompt);
+          return;
+        }
+        if (key.name === "backspace" || key.name === "delete") {
+          setComposer((previous) => previous.slice(0, -1));
+          return;
+        }
+        if (!key.ctrl && !key.meta && typeof input === "string" && input.length > 0) {
+          setComposer((previous) => `${previous}${input}`);
+        }
+        return;
+      }
+
       if (input === "q" || key.escape) {
         exit();
         return;
@@ -611,19 +925,62 @@ async function runButlerTui({ initialMode, refreshMs }) {
       }
       if (input === "i") {
         setShowIssues((value) => !value);
+        return;
+      }
+      if (input === "e") {
+        setIsComposing(true);
+        setNotice(`compose ${jobKind} prompt`);
+        return;
+      }
+      if (input === "k") {
+        setJobKind((current) => {
+          const next = current === "task" ? "run" : "task";
+          setNotice(`kind=${next}`);
+          return next;
+        });
+        return;
+      }
+      if (input === "a") {
+        void approveActiveJob();
+        return;
+      }
+      if (input === "x") {
+        void abortActiveJob();
+        return;
+      }
+      if (input === "c") {
+        setEventLog([]);
+        setNotice("console cleared");
       }
     });
 
     const doctorColor = snapshot.issues.length === 0 ? "green" : "yellow";
     const skillColor = snapshot.missingSkillEnv.length === 0 ? "green" : "yellow";
     const mcpColor = snapshot.mcpTargets > 0 ? "green" : "yellow";
+    const remoteColor = remoteReady ? "green" : "yellow";
+    const activeStatus = activeJob?.status ?? "idle";
+    const activeStatusColor = getTuiJobStatusColor(activeStatus);
+    const outputValue = String(activeJob?.resultText || activeJob?.error || "");
+    const outputPreview = summarizeTuiText(outputValue, TUI_OUTPUT_PREVIEW_CHARS);
+    const eventPreview = eventLog.slice(-8);
 
     return React.createElement(
       Box,
       { flexDirection: "column", paddingX: 1, paddingY: 1 },
-      React.createElement(Text, { color: "cyan", bold: true }, "Butler TUI (Ink MVP)"),
-      React.createElement(Text, null, `Mode: ${mode} (press 'm' to toggle)`),
-      React.createElement(Text, null, `Last refresh: ${snapshot.refreshedAt}`),
+      React.createElement(Text, { color: "cyan", bold: true }, "Butler TUI (Operator Console)"),
+      React.createElement(Text, null, `Mode: ${mode} | Kind: ${jobKind} | Last refresh: ${snapshot.refreshedAt}`),
+      React.createElement(
+        Text,
+        { color: remoteColor },
+        `Remote: ${remoteContext.baseUrl} | gateway token: ${remoteReady ? "ready" : "missing/short"}`
+      ),
+      React.createElement(
+        Text,
+        { color: "gray" },
+        `Identity: chat=${remoteContext.chatId} requester=${remoteContext.requesterId} session=${remoteContext.sessionKey}${
+          remoteContext.threadId ? ` thread=${remoteContext.threadId}` : ""
+        }`
+      ),
       React.createElement(Text, { color: doctorColor }, `Doctor: ${snapshot.issues.length === 0 ? "ok" : `${snapshot.issues.length} issue(s)`}`),
       React.createElement(
         Text,
@@ -635,11 +992,44 @@ async function runButlerTui({ initialMode, refreshMs }) {
         { color: mcpColor },
         `MCP: targets=${snapshot.mcpTargets}, wrappers=${snapshot.mcpWrappers}, config=${snapshot.mcpConfigStatus}`
       ),
-      React.createElement(Text, null, "Quick commands:"),
+      activeJob
+        ? React.createElement(
+            Text,
+            { color: activeStatusColor },
+            `Active job: ${activeJob.id} (${activeJob.status})${activeJob.requiresApproval ? " requires approval" : ""}`
+          )
+        : React.createElement(Text, { color: "gray" }, "Active job: none"),
+      activeJob && activeJob.status === "needs_approval"
+        ? React.createElement(Text, { color: "yellow" }, "Use 'a' to approve this run job.")
+        : null,
+      outputPreview
+        ? React.createElement(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            React.createElement(Text, { color: "cyan" }, "Output preview:"),
+            React.createElement(Text, { key: "out-0" }, outputPreview)
+          )
+        : null,
+      eventPreview.length > 0
+        ? React.createElement(
+            Box,
+            { flexDirection: "column", marginTop: 1 },
+            React.createElement(Text, { color: "cyan" }, "Event stream:"),
+            ...eventPreview.map((line, index) => React.createElement(Text, { key: `ev-${index}`, color: "gray" }, line))
+          )
+        : null,
+      React.createElement(Text, null, "Console commands:"),
       React.createElement(Text, { color: "gray" }, `  npm run butler -- doctor --mode ${mode}`),
       React.createElement(Text, { color: "gray" }, `  npm run butler -- up --mode ${mode}`),
       React.createElement(Text, { color: "gray" }, "  npm run butler -- skills list"),
       React.createElement(Text, { color: "gray" }, "  npm run butler -- mcp list"),
+      isComposing
+        ? React.createElement(Text, { color: "cyan" }, `Compose (${jobKind}) > ${composer}█`)
+        : React.createElement(Text, { color: "gray" }, "Press 'e' to compose and submit a prompt."),
+      React.createElement(Text, null, "Quick commands:"),
+      React.createElement(Text, { color: "gray" }, "  e compose prompt | enter submit | esc cancel"),
+      React.createElement(Text, { color: "gray" }, "  k toggle kind task/run | a approve | x abort"),
+      React.createElement(Text, { color: "gray" }, "  r refresh | m mode | i details | c clear log | q quit"),
       showIssues && snapshot.issues.length > 0
         ? React.createElement(
             Box,
@@ -663,7 +1053,7 @@ async function runButlerTui({ initialMode, refreshMs }) {
       React.createElement(
         Text,
         { color: "gray" },
-        "Keys: r refresh | m mode | i toggle details | q quit"
+        "OpenClaw-style loop: compose -> submit -> stream -> approve/abort -> inspect output"
       ),
       notice ? React.createElement(Text, { color: "gray" }, `Last action: ${notice}`) : null
     );
@@ -671,6 +1061,184 @@ async function runButlerTui({ initialMode, refreshMs }) {
 
   const app = render(React.createElement(ButlerTuiApp), { exitOnCtrlC: false });
   await app.waitUntilExit();
+}
+
+function getTuiJobStatusColor(status) {
+  if (status === "completed") {
+    return "green";
+  }
+  if (status === "failed") {
+    return "red";
+  }
+  if (status === "needs_approval" || status === "aborting" || status === "aborted") {
+    return "yellow";
+  }
+  if (status === "running") {
+    return "cyan";
+  }
+  return "gray";
+}
+
+function isTerminalJobStatus(status) {
+  return status === "completed" || status === "failed" || status === "aborted";
+}
+
+function formatTuiClock(rawTs = new Date().toISOString()) {
+  const date = new Date(rawTs);
+  if (Number.isNaN(date.getTime())) {
+    return String(rawTs);
+  }
+  return date.toISOString().slice(11, 19);
+}
+
+function summarizeTuiText(value, maxChars) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars - 3)}...`;
+}
+
+function extractAgentDelta(event) {
+  const delta = event?.data?.delta;
+  return typeof delta === "string" ? delta : "";
+}
+
+function formatTuiEventLine(event) {
+  const ts = formatTuiClock(event?.ts);
+  const type = String(event?.type ?? "event");
+  if (type === "agent_text_delta") {
+    const delta = summarizeTuiText(extractAgentDelta(event), TUI_EVENT_PREVIEW_CHARS);
+    return `${ts} delta ${delta || "(empty)"}`;
+  }
+  if (type === "tool_start") {
+    const tool = summarizeTuiText(String(event?.data?.tool ?? event?.message ?? "unknown"), TUI_EVENT_PREVIEW_CHARS);
+    return `${ts} tool:start ${tool}`;
+  }
+  if (type === "tool_end") {
+    const tool = summarizeTuiText(String(event?.data?.tool ?? event?.message ?? "unknown"), TUI_EVENT_PREVIEW_CHARS);
+    return `${ts} tool:end ${tool}`;
+  }
+  const message = summarizeTuiText(String(event?.message ?? ""), TUI_EVENT_PREVIEW_CHARS);
+  return message ? `${ts} ${type}: ${message}` : `${ts} ${type}`;
+}
+
+async function tuiCreateJob(remoteContext, input) {
+  const payload = {
+    kind: input.kind,
+    prompt: String(input.prompt ?? ""),
+    channel: "telegram",
+    chatId: remoteContext.chatId,
+    requesterId: remoteContext.requesterId,
+    sessionKey: remoteContext.sessionKey,
+    requiresApproval: input.kind === "run",
+    metadata: {
+      source: "butler-tui"
+    }
+  };
+  if (remoteContext.threadId) {
+    payload.threadId = remoteContext.threadId;
+  }
+  const response = await tuiOrchestratorRequest(remoteContext, "/v1/jobs", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  if (!response?.job || typeof response.job !== "object") {
+    throw new Error("invalid orchestrator response: missing job");
+  }
+  return response.job;
+}
+
+async function tuiGetJob(remoteContext, jobId) {
+  const response = await tuiOrchestratorRequest(
+    remoteContext,
+    `/v1/jobs/${encodeURIComponent(String(jobId ?? ""))}`,
+    {
+      method: "GET"
+    }
+  );
+  if (!response?.job || typeof response.job !== "object") {
+    throw new Error("invalid orchestrator response: missing job");
+  }
+  return response.job;
+}
+
+async function tuiGetJobEvents(remoteContext, jobId, cursor) {
+  const safeCursor = Number.isFinite(Number(cursor)) && Number(cursor) >= 0 ? Math.floor(Number(cursor)) : 0;
+  return tuiOrchestratorRequest(
+    remoteContext,
+    `/v1/jobs/${encodeURIComponent(String(jobId ?? ""))}/events?cursor=${encodeURIComponent(String(safeCursor))}`,
+    {
+      method: "GET"
+    }
+  );
+}
+
+async function tuiApproveJob(remoteContext, jobId) {
+  const response = await tuiOrchestratorRequest(
+    remoteContext,
+    `/v1/jobs/${encodeURIComponent(String(jobId ?? ""))}/approve`,
+    {
+      method: "POST",
+      body: "{}"
+    }
+  );
+  if (!response?.job || typeof response.job !== "object") {
+    throw new Error("invalid orchestrator response: missing job");
+  }
+  return response.job;
+}
+
+async function tuiAbortJob(remoteContext, jobId) {
+  const response = await tuiOrchestratorRequest(
+    remoteContext,
+    `/v1/jobs/${encodeURIComponent(String(jobId ?? ""))}/abort`,
+    {
+      method: "POST",
+      body: "{}"
+    }
+  );
+  if (!response?.job || typeof response.job !== "object") {
+    throw new Error("invalid orchestrator response: missing job");
+  }
+  return response.job;
+}
+
+async function tuiOrchestratorRequest(remoteContext, path, init) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 20_000);
+  const baseUrl = String(remoteContext.baseUrl ?? "").replace(/\/+$/g, "");
+  if (!baseUrl) {
+    throw new Error("ORCH_BASE_URL is missing");
+  }
+
+  try {
+    const response = await fetch(`${baseUrl}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": remoteContext.gatewayToken,
+        ...(init?.headers ?? {})
+      }
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`orchestrator request failed (${response.status}): ${summarizeTuiText(text, 260)}`);
+    }
+    if (response.status === 204) {
+      return {};
+    }
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function collectTuiSnapshot(mode) {
@@ -2012,6 +2580,16 @@ function parseMode(raw) {
     return raw;
   }
   throw new Error(`Invalid mode '${raw}'. Expected 'mock' or 'rpc'.`);
+}
+
+function parseTuiJobKind(raw) {
+  const normalized = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "task" || normalized === "run") {
+    return normalized;
+  }
+  throw new Error(`Invalid kind '${raw}'. Expected 'task' or 'run'.`);
 }
 
 function parseBooleanLike(value) {

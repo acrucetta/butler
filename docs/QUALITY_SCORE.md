@@ -14,6 +14,7 @@ Each area is scored from `1` to `5`.
 | Orchestrator lifecycle logic | 3 | Clear job state transitions | Add persistence failure tests |
 | Telegram authorization flow | 3 | Owner/pairing and command gating exist | Add regression tests for edge cases |
 | Worker execution loop | 3 | Abort heartbeat, event streaming, and tool allow/deny policy exist | Add retries/backoff and policy regression tests |
+| Operator control surface (CLI/TUI) | 3 | `butler tui` now supports remote job submit + event stream + approve/abort controls | Add automated TUI interaction smoke tests |
 | Documentation legibility for agents | 4 | Structured harness docs now include skill integration playbooks (Readwise/Google/HEY) | Keep docs synced by check + review |
 | Automated quality gates | 2 | Build and harness checks run locally | Wire `verify:harness` into CI |
 

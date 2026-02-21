@@ -196,23 +196,43 @@ npm run pi-self -- up --mode mock
 
 ## Butler TUI (Ink)
 
-For an OpenClaw-style runtime control surface, launch Butler's terminal UI:
+For an OpenClaw-style operator loop (compose -> submit -> stream -> approve/abort), launch:
 
 ```bash
 npm run butler -- tui
 ```
 
 Controls:
+- `e`: compose prompt
+- `enter`: submit prompt (while composing)
+- `esc`: cancel compose
+- `k`: toggle submit kind (`task`/`run`)
+- `a`: approve active `run` job in `needs_approval`
+- `x`: abort active job
 - `r`: refresh snapshot
 - `m`: toggle doctor mode (`mock`/`rpc`)
 - `i`: show/hide issue details
+- `c`: clear event log
 - `q`: quit
 
 Optional flags:
 
 ```bash
 npm run butler -- tui --mode rpc --refresh-ms 3000
+npm run butler -- tui --kind run --message "check disk usage on pi"
+npm run butler -- tui --chat-id butler-ops --requester-id operator --session-key butler-main
 ```
+
+Required env for remote submit:
+- `ORCH_BASE_URL` (default `http://127.0.0.1:8787`)
+- `ORCH_GATEWAY_TOKEN` (must be configured; same auth path as gateway)
+
+Optional env defaults for TUI identity:
+- `BUTLER_TUI_KIND`
+- `BUTLER_TUI_CHAT_ID`
+- `BUTLER_TUI_REQUESTER_ID`
+- `BUTLER_TUI_SESSION_KEY`
+- `BUTLER_TUI_THREAD_ID`
 
 ## OpenClaw-style personality + memory
 
