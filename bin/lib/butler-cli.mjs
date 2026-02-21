@@ -1168,9 +1168,12 @@ async function runSetupSkillOnboarding(options) {
   if (selectedForConfig.some((id) => id === "gmail" || id === "google-calendar")) {
     const googleCredentialResult = await runGoogleCredentialOnboarding({
       interactive: Boolean(options.interactive),
-      prompter: options.prompter
+      prompter: options.prompter,
+      explicitEnv,
+      envSources: options.envSources
     });
     credentialWarnings.push(...googleCredentialResult.warnings);
+    Object.assign(envUpdates, googleCredentialResult.envUpdates ?? {});
     if (googleCredentialResult.account) {
       envUpdates.GOG_ACCOUNT = googleCredentialResult.account;
     }

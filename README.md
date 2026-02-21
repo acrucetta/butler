@@ -134,6 +134,7 @@ OPENAI_API_KEY=<openai-api-key>
 # TG_MEDIA_STT_MODEL=gpt-4o-mini-transcribe
 # TG_MEDIA_VISION_MODEL=gpt-5-mini
 # TG_MEDIA_MAX_FILE_MB=20
+# TG_MEDIA_VISION_MAX_FILE_MB=8
 # TG_MEDIA_TRANSCRIPT_MAX_CHARS=6000
 # TG_MEDIA_VISION_MAX_CHARS=4000
 # optional: override session context store path

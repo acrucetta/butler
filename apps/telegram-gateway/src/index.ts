@@ -60,6 +60,8 @@ const agentMarkdownV2 = parseBoolean(process.env.TG_AGENT_MARKDOWNV2, true);
 const mediaEnabled = parseBoolean(process.env.TG_MEDIA_ENABLED, true);
 const mediaMaxFileMb = parsePositiveInt(process.env.TG_MEDIA_MAX_FILE_MB, 20);
 const mediaMaxFileBytes = mediaMaxFileMb * 1024 * 1024;
+const mediaVisionMaxFileMb = parsePositiveInt(process.env.TG_MEDIA_VISION_MAX_FILE_MB, 8);
+const mediaVisionMaxFileBytes = mediaVisionMaxFileMb * 1024 * 1024;
 const mediaTranscriptMaxChars = parsePositiveInt(process.env.TG_MEDIA_TRANSCRIPT_MAX_CHARS, 6_000);
 const mediaVisionMaxChars = parsePositiveInt(process.env.TG_MEDIA_VISION_MAX_CHARS, 4_000);
 const mediaSttModel = process.env.TG_MEDIA_STT_MODEL?.trim() || "gpt-4o-mini-transcribe";
@@ -309,13 +311,21 @@ bot.on("message:photo", async (ctx) => {
     }
 
     const file = await downloadTelegramFile(photo.file_id);
-    if (file.bytes.length > mediaMaxFileBytes) {
-      await ctx.reply(`Photo is too large (${formatMb(file.bytes.length)} MB). Max allowed is ${mediaMaxFileMb} MB.`);
+    if (file.bytes.length > mediaVisionMaxFileBytes) {
+      await ctx.reply(
+        `Photo is too large (${formatMb(file.bytes.length)} MB). Max allowed for photo analysis is ${mediaVisionMaxFileMb} MB.`
+      );
       return;
     }
 
     const caption = (ctx.message.caption ?? "").trim();
-    const analysis = await generateImageAnalysis(file.bytes, file.mimeType ?? "image/jpeg");
+    const detectedMimeType = detectImageMimeTypeFromBytes(file.bytes) ?? file.mimeType ?? "image/jpeg";
+    if (!isSupportedImageMimeType(detectedMimeType)) {
+      await ctx.reply(`Unsupported photo format (${detectedMimeType}). Send JPG, PNG, or WEBP.`);
+      return;
+    }
+
+    const analysis = await generateImageAnalysis(file.bytes, detectedMimeType);
     const prompt = buildPhotoPrompt(
       truncateText(analysis, mediaVisionMaxChars, "photo analysis"),
       caption
@@ -331,6 +341,7 @@ bot.on("message:photo", async (ctx) => {
       telegramMediaMimeType: file.mimeType ?? "image/jpeg"
     });
   } catch (error) {
+    console.warn(`[gateway] photo handler failed: ${formatError(error)}`);
     await ctx.reply(`Request failed: ${formatError(error)}`);
   }
 });
@@ -495,6 +506,7 @@ async function handleVoiceOrAudioMessage(ctx: any, inputType: "voice" | "audio")
 
     await submitJob(ctx, prompt, "task", false, metadata);
   } catch (error) {
+    console.warn(`[gateway] ${inputType} handler failed: ${formatError(error)}`);
     await ctx.reply(`Request failed: ${formatError(error)}`);
   }
 }
@@ -511,10 +523,12 @@ async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buffer; fi
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
+  const mimeTypeFromBytes = guessMimeTypeFromBytes(buffer);
+  const mimeTypeFromPath = guessMimeTypeFromPath(file.file_path);
   return {
     bytes: buffer,
     filePath: file.file_path,
-    mimeType: guessMimeTypeFromPath(file.file_path)
+    mimeType: mimeTypeFromBytes ?? mimeTypeFromPath
   };
 }
 
@@ -545,45 +559,21 @@ async function transcribeAudio(bytes: Buffer, filename: string, mimeType: string
 }
 
 async function generateImageAnalysis(bytes: Buffer, mimeType: string): Promise<string> {
-  const imageDataUrl = `data:${mimeType};base64,${bytes.toString("base64")}`;
+  const candidates = buildImageMimeCandidates(bytes, mimeType);
+  let lastError: unknown = undefined;
 
-  const response = await fetch(`${mediaOpenAiBaseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${mediaOpenAiApiKey}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      model: mediaVisionModel,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You analyze Telegram photos for an assistant. Describe what is visible and extract any readable text. Be concise and factual."
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Analyze this Telegram photo and include key text visible in the image." },
-            { type: "image_url", image_url: { url: imageDataUrl } }
-          ]
-        }
-      ],
-      max_completion_tokens: 700
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Photo analysis failed (${response.status}): ${await readErrorBody(response)}`);
+  for (const candidateMime of candidates) {
+    try {
+      return await requestImageAnalysis(bytes, candidateMime);
+    } catch (error) {
+      lastError = error;
+      if (!isRecoverableImageParseError(error)) {
+        throw error;
+      }
+    }
   }
 
-  const payload = (await response.json()) as ChatCompletionsResponse;
-  const analysis = extractChatMessageText(payload);
-  if (!analysis) {
-    throw new Error("Photo analysis response was empty");
-  }
-
-  return analysis.trim();
+  throw lastError ?? new Error("Photo analysis failed");
 }
 
 function buildVoicePrompt(transcript: string, caption: string, inputType: "voice" | "audio"): string {
@@ -638,6 +628,131 @@ function guessMimeTypeFromPath(filePath: string): string | undefined {
   if (lower.endsWith(".png")) return "image/png";
   if (lower.endsWith(".webp")) return "image/webp";
   return undefined;
+}
+
+function guessMimeTypeFromBytes(bytes: Buffer): string | undefined {
+  if (bytes.length < 12) {
+    return undefined;
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  if (
+    bytes[0] === 0x4f &&
+    bytes[1] === 0x67 &&
+    bytes[2] === 0x67 &&
+    bytes[3] === 0x53
+  ) {
+    return "audio/ogg";
+  }
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x41 &&
+    bytes[10] === 0x56 &&
+    bytes[11] === 0x45
+  ) {
+    return "audio/wav";
+  }
+  if (
+    bytes[0] === 0x49 &&
+    bytes[1] === 0x44 &&
+    bytes[2] === 0x33
+  ) {
+    return "audio/mpeg";
+  }
+  return undefined;
+}
+
+function detectImageMimeTypeFromBytes(bytes: Buffer): string | undefined {
+  const mimeType = guessMimeTypeFromBytes(bytes);
+  return mimeType && isSupportedImageMimeType(mimeType) ? mimeType : undefined;
+}
+
+function isSupportedImageMimeType(mimeType: string): boolean {
+  return mimeType === "image/jpeg" || mimeType === "image/png" || mimeType === "image/webp";
+}
+
+function buildImageMimeCandidates(bytes: Buffer, primaryMimeType: string): string[] {
+  const detected = detectImageMimeTypeFromBytes(bytes);
+  const values = [primaryMimeType, detected, "image/jpeg", "image/png", "image/webp"];
+  const unique = new Set<string>();
+  for (const value of values) {
+    if (!value) continue;
+    if (!isSupportedImageMimeType(value)) continue;
+    unique.add(value);
+  }
+  return [...unique];
+}
+
+async function requestImageAnalysis(bytes: Buffer, mimeType: string): Promise<string> {
+  const imageDataUrl = `data:${mimeType};base64,${bytes.toString("base64")}`;
+
+  const response = await fetch(`${mediaOpenAiBaseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${mediaOpenAiApiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: mediaVisionModel,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You analyze Telegram photos for an assistant. Describe what is visible and extract any readable text. Be concise and factual."
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Analyze this Telegram photo and include key text visible in the image." },
+            { type: "image_url", image_url: { url: imageDataUrl } }
+          ]
+        }
+      ],
+      reasoning_effort: "minimal",
+      max_completion_tokens: 1200
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Photo analysis failed (${response.status}): ${await readErrorBody(response)}`);
+  }
+
+  const payload = (await response.json()) as ChatCompletionsResponse;
+  const analysis = extractChatMessageText(payload);
+  if (!analysis) {
+    throw new Error("Photo analysis response was empty");
+  }
+
+  return analysis.trim();
 }
 
 function normalizeAudioUploadFilename(filePath: string | undefined, inputType: "voice" | "audio"): string {
@@ -1101,6 +1216,15 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function isRecoverableImageParseError(error: unknown): boolean {
+  const text = formatError(error).toLowerCase();
+  return (
+    text.includes("image_parse_error") ||
+    text.includes("invalid image") ||
+    text.includes("unsupported image")
+  );
 }
 
 function isTelegramEntityParseError(error: unknown): boolean {
