@@ -178,47 +178,38 @@ npm run butler -- doctor
 5. Start everything:
 
 ```bash
-# safe local mode (worker mock)
 npm run up
-
-# or explicit
-npm run butler -- up --mode mock
-
-# real Pi mode (requires pi installed/authenticated in worker env)
-npm run butler -- up --mode rpc
 ```
 
-Legacy alias still works:
+Butler auto-picks execution mode:
+- `rpc` when `pi` is installed
+- `mock` otherwise
 
 ```bash
-npm run pi-self -- up --mode mock
+# optional override
+npm run butler -- up --mode rpc
+npm run butler -- up --mode mock
 ```
 
-## Butler TUI (Ink)
+## Butler TUI (Minimal Command Bar)
 
-For an OpenClaw-style operator loop (compose -> submit -> stream -> approve/abort), launch:
+For a simple remote command bar:
 
 ```bash
 npm run butler -- tui
 ```
 
-Controls:
-- `e`: compose prompt
-- `enter`: submit prompt (while composing)
-- `esc`: cancel compose
-- `k`: toggle submit kind (`task`/`run`)
-- `a`: approve active `run` job in `needs_approval`
-- `x`: abort active job
-- `r`: refresh snapshot
-- `m`: toggle doctor mode (`mock`/`rpc`)
-- `i`: show/hide issue details
-- `c`: clear event log
-- `q`: quit
+Type plain text to submit a prompt. Use slash commands when needed:
+- `/help`
+- `/kind task|run`
+- `/status`
+- `/approve`
+- `/abort`
+- `/quit`
 
 Optional flags:
 
 ```bash
-npm run butler -- tui --mode rpc --refresh-ms 3000
 npm run butler -- tui --kind run --message "check disk usage on pi"
 npm run butler -- tui --chat-id butler-ops --requester-id operator --session-key butler-main
 ```

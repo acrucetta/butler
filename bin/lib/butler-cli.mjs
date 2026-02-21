@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
@@ -39,10 +39,8 @@ const SETUP_PREBUILT_SKILLS = ["readwise", "gmail", "google-calendar", "hey-emai
 const DEFAULT_TUI_CHAT_ID = "butler-tui-chat";
 const DEFAULT_TUI_REQUESTER_ID = "butler-tui";
 const DEFAULT_TUI_SESSION_KEY = "butler-tui";
-const TUI_EVENT_LOG_LIMIT = 40;
-const TUI_OUTPUT_PREVIEW_CHARS = 900;
-const TUI_EVENT_PREVIEW_CHARS = 180;
 const TUI_JOB_POLL_INTERVAL_MS = 1200;
+const DEFAULT_EXEC_MODE = resolveDefaultExecMode();
 
 export async function runButlerCli(options = {}) {
   const cliName = options.cliName ?? "butler";
@@ -94,7 +92,7 @@ export async function runButlerCli(options = {}) {
   program
     .command("doctor")
     .description("Run environment and runtime checks")
-    .option("--mode <mode>", "worker mode: mock|rpc", process.env.PI_EXEC_MODE ?? "mock")
+    .option("--mode <mode>", "worker mode: mock|rpc", DEFAULT_EXEC_MODE)
     .action((cmdOptions) => {
       const mode = parseMode(cmdOptions.mode);
       const issues = runDoctor({
@@ -120,7 +118,7 @@ export async function runButlerCli(options = {}) {
   program
     .command("up")
     .description("Run orchestrator + worker + gateway together")
-    .option("--mode <mode>", "worker mode: mock|rpc", process.env.PI_EXEC_MODE ?? "mock")
+    .option("--mode <mode>", "worker mode: mock|rpc", DEFAULT_EXEC_MODE)
     .option("--no-orchestrator", "do not start orchestrator")
     .option("--no-worker", "do not start worker")
     .option("--no-gateway", "do not start telegram gateway")
@@ -217,9 +215,7 @@ export async function runButlerCli(options = {}) {
 
   program
     .command("tui")
-    .description("Open runtime operator TUI")
-    .option("--mode <mode>", "worker mode used for doctor checks: mock|rpc", process.env.PI_EXEC_MODE ?? "mock")
-    .option("--refresh-ms <ms>", "auto-refresh interval in milliseconds", "5000")
+    .description("Open minimal remote command bar")
     .option("--kind <kind>", "default submit kind: task|run", process.env.BUTLER_TUI_KIND ?? "task")
     .option("--chat-id <id>", "synthetic chat id for TUI jobs", process.env.BUTLER_TUI_CHAT_ID ?? DEFAULT_TUI_CHAT_ID)
     .option(
@@ -235,12 +231,8 @@ export async function runButlerCli(options = {}) {
     .option("--thread-id <id>", "optional thread id for submitted TUI jobs", process.env.BUTLER_TUI_THREAD_ID ?? "")
     .option("--message <text>", "optional prompt to send immediately after startup")
     .action(async (cmdOptions) => {
-      const mode = parseMode(cmdOptions.mode);
-      const refreshMs = parsePositiveInteger(cmdOptions.refreshMs, 5000);
       const initialJobKind = parseTuiJobKind(cmdOptions.kind);
       await runButlerTui({
-        initialMode: mode,
-        refreshMs: Math.max(1000, refreshMs),
         initialJobKind,
         chatId: String(cmdOptions.chatId ?? DEFAULT_TUI_CHAT_ID).trim() || DEFAULT_TUI_CHAT_ID,
         requesterId: String(cmdOptions.requesterId ?? DEFAULT_TUI_REQUESTER_ID).trim() || DEFAULT_TUI_REQUESTER_ID,
@@ -586,25 +578,13 @@ export async function runButlerCli(options = {}) {
   await program.parseAsync(process.argv);
 }
 
-async function runButlerTui({
-  initialMode,
-  refreshMs,
-  initialJobKind,
-  chatId,
-  requesterId,
-  sessionKey,
-  threadId,
-  initialMessage
-}) {
+async function runButlerTui({ initialJobKind, chatId, requesterId, sessionKey, threadId, initialMessage }) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error("tui: requires an interactive TTY terminal");
     process.exitCode = 1;
     return;
   }
 
-  const [{ render, Box, Text, useApp, useInput }, ReactModule] = await Promise.all([import("ink"), import("react")]);
-  const React = ReactModule.default ?? ReactModule;
-  const { useCallback, useEffect, useRef, useState } = ReactModule;
   const remoteContext = {
     baseUrl: coalesce(process.env.ORCH_BASE_URL, "http://127.0.0.1:8787"),
     gatewayToken: coalesce(process.env.ORCH_GATEWAY_TOKEN),
@@ -613,470 +593,289 @@ async function runButlerTui({
     sessionKey,
     threadId
   };
+  const remoteReady = remoteContext.gatewayToken.length >= 16;
 
-  function ButlerTuiApp() {
-    const { exit } = useApp();
-    const [mode, setMode] = useState(initialMode);
-    const [snapshot, setSnapshot] = useState(() => collectTuiSnapshot(initialMode));
-    const [showIssues, setShowIssues] = useState(false);
-    const [notice, setNotice] = useState("");
-    const [jobKind, setJobKind] = useState(initialJobKind);
-    const [composer, setComposer] = useState(initialMessage ?? "");
-    const [isComposing, setIsComposing] = useState(Boolean(initialMessage));
-    const [isMutatingJob, setIsMutatingJob] = useState(false);
-    const [activeJob, setActiveJob] = useState(null);
-    const [eventLog, setEventLog] = useState([]);
-    const pollCursorRef = useRef(0);
-    const pollInFlightRef = useRef(false);
-    const initialMessageSentRef = useRef(false);
-    const remoteReady = remoteContext.gatewayToken.length >= 16;
+  const state = {
+    kind: initialJobKind,
+    activeJob: null,
+    lastJob: null,
+    pollTimer: null,
+    pollInFlight: false,
+    commandInFlight: false
+  };
 
-    const appendEventLog = useCallback((line) => {
-      setEventLog((previous) => {
-        const next = [...previous, line];
-        return next.slice(-TUI_EVENT_LOG_LIMIT);
-      });
-    }, []);
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
+  });
 
-    const refresh = useCallback(
-      (nextMode = mode) => {
-        setSnapshot(collectTuiSnapshot(nextMode));
-      },
-      [mode]
-    );
+  const renderPrompt = () => {
+    rl.setPrompt(`butler:${state.kind}> `);
+    rl.prompt();
+  };
 
-    useEffect(() => {
-      const timer = setInterval(() => refresh(), refreshMs);
-      return () => clearInterval(timer);
-    }, [refresh]);
+  const printLine = (line = "") => {
+    process.stdout.write(`${line}\n`);
+  };
 
-    const submitPrompt = useCallback(
-      async (rawPrompt) => {
-        const prompt = String(rawPrompt ?? "").trim();
-        if (!prompt) {
-          setNotice("empty prompt");
-          return;
-        }
-        if (!remoteReady) {
-          setNotice("missing ORCH_GATEWAY_TOKEN");
-          appendEventLog(`${formatTuiClock()} submit blocked: ORCH_GATEWAY_TOKEN missing/too short`);
-          return;
-        }
-        if (isMutatingJob) {
-          setNotice("wait: request already in flight");
-          return;
-        }
+  const printStatusLine = (line) => {
+    process.stdout.write(`\n${line}\n`);
+  };
 
-        setIsMutatingJob(true);
-        try {
-          const job = await tuiCreateJob(remoteContext, {
-            kind: jobKind,
-            prompt
-          });
-          pollCursorRef.current = 0;
-          setActiveJob({
-            id: String(job.id ?? ""),
-            status: String(job.status ?? "queued"),
-            kind: String(job.kind ?? jobKind),
-            requiresApproval: Boolean(job.requiresApproval),
-            resultText: String(job.resultText ?? ""),
-            error: String(job.error ?? ""),
-            updatedAt: String(job.updatedAt ?? new Date().toISOString())
-          });
-          appendEventLog(`${formatTuiClock()} created ${job.id} (${job.status})`);
-          setNotice(`submitted ${job.id}`);
-          refresh();
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          appendEventLog(`${formatTuiClock()} submit failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
-          setNotice("submit failed");
-        } finally {
-          setIsMutatingJob(false);
-        }
-      },
-      [appendEventLog, isMutatingJob, jobKind, refresh, remoteReady]
-    );
+  const stopPolling = () => {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+  };
 
-    const approveActiveJob = useCallback(async () => {
-      if (!activeJob?.id) {
-        setNotice("no active job");
-        return;
-      }
-      if (activeJob.status !== "needs_approval") {
-        setNotice("active job does not need approval");
-        return;
-      }
-      if (!remoteReady) {
-        setNotice("missing ORCH_GATEWAY_TOKEN");
-        return;
-      }
-      if (isMutatingJob) {
-        setNotice("wait: request already in flight");
-        return;
-      }
-
-      setIsMutatingJob(true);
-      try {
-        const job = await tuiApproveJob(remoteContext, activeJob.id);
-        setActiveJob((current) =>
-          current && current.id === activeJob.id
-            ? {
-                ...current,
-                status: String(job.status ?? current.status),
-                requiresApproval: Boolean(job.requiresApproval),
-                updatedAt: String(job.updatedAt ?? current.updatedAt)
-              }
-            : current
-        );
-        appendEventLog(`${formatTuiClock()} approved ${activeJob.id}`);
-        setNotice(`approved ${activeJob.id}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        appendEventLog(`${formatTuiClock()} approve failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
-        setNotice("approve failed");
-      } finally {
-        setIsMutatingJob(false);
-      }
-    }, [activeJob, appendEventLog, isMutatingJob, remoteReady]);
-
-    const abortActiveJob = useCallback(async () => {
-      if (!activeJob?.id) {
-        setNotice("no active job");
-        return;
-      }
-      if (!remoteReady) {
-        setNotice("missing ORCH_GATEWAY_TOKEN");
-        return;
-      }
-      if (isMutatingJob) {
-        setNotice("wait: request already in flight");
-        return;
-      }
-
-      setIsMutatingJob(true);
-      try {
-        const job = await tuiAbortJob(remoteContext, activeJob.id);
-        setActiveJob((current) =>
-          current && current.id === activeJob.id
-            ? {
-                ...current,
-                status: String(job.status ?? current.status),
-                error: String(job.error ?? current.error ?? ""),
-                updatedAt: String(job.updatedAt ?? current.updatedAt)
-              }
-            : current
-        );
-        appendEventLog(`${formatTuiClock()} abort requested for ${activeJob.id}`);
-        setNotice(`abort requested ${activeJob.id}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        appendEventLog(`${formatTuiClock()} abort failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
-        setNotice("abort failed");
-      } finally {
-        setIsMutatingJob(false);
-      }
-    }, [activeJob, appendEventLog, isMutatingJob, remoteReady]);
-
-    useEffect(() => {
-      if (!initialMessage || initialMessageSentRef.current) {
-        return;
-      }
-      initialMessageSentRef.current = true;
-      setIsComposing(false);
-      setComposer("");
-      void submitPrompt(initialMessage);
-    }, [initialMessage, submitPrompt]);
-
-    useEffect(() => {
-      if (!activeJob?.id || !remoteReady || isTerminalJobStatus(activeJob.status)) {
-        return;
-      }
-
-      let canceled = false;
-      const poll = async () => {
-        if (canceled || pollInFlightRef.current) {
-          return;
-        }
-        pollInFlightRef.current = true;
-
-        try {
-          const eventsPayload = await tuiGetJobEvents(remoteContext, activeJob.id, pollCursorRef.current);
-          if (canceled) {
-            return;
-          }
-
-          const events = Array.isArray(eventsPayload?.events) ? eventsPayload.events : [];
-          const nextCursor = Number(eventsPayload?.nextCursor);
-          if (Number.isFinite(nextCursor) && nextCursor >= 0) {
-            pollCursorRef.current = Math.floor(nextCursor);
-          }
-
-          if (events.length > 0) {
-            setActiveJob((current) => {
-              if (!current || current.id !== activeJob.id) {
-                return current;
-              }
-              let nextResultText = String(current.resultText ?? "");
-              for (const event of events) {
-                nextResultText += extractAgentDelta(event);
-              }
-              return {
-                ...current,
-                resultText: nextResultText
-              };
-            });
-
-            for (const event of events) {
-              appendEventLog(formatTuiEventLine(event));
-            }
-          }
-
-          const latestJob = await tuiGetJob(remoteContext, activeJob.id);
-          if (canceled) {
-            return;
-          }
-          setActiveJob((current) => {
-            if (!current || current.id !== activeJob.id) {
-              return current;
-            }
-            return {
-              ...current,
-              status: String(latestJob.status ?? current.status),
-              requiresApproval: Boolean(latestJob.requiresApproval),
-              resultText: String(latestJob.resultText ?? current.resultText ?? ""),
-              error: String(latestJob.error ?? current.error ?? ""),
-              updatedAt: String(latestJob.updatedAt ?? current.updatedAt)
-            };
-          });
-
-          if (isTerminalJobStatus(String(latestJob.status ?? ""))) {
-            appendEventLog(`${formatTuiClock()} job ${activeJob.id} ${latestJob.status}`);
-            setNotice(`job ${activeJob.id} ${latestJob.status}`);
-            refresh();
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          appendEventLog(`${formatTuiClock()} poll failed: ${summarizeTuiText(message, TUI_EVENT_PREVIEW_CHARS)}`);
-          setNotice("poll failed");
-        } finally {
-          pollInFlightRef.current = false;
-        }
-      };
-
-      void poll();
-      const timer = setInterval(() => {
-        void poll();
+  const setActiveJob = (next) => {
+    state.activeJob = next;
+    if (!next || isTerminalJobStatus(next.status)) {
+      stopPolling();
+      return;
+    }
+    if (!state.pollTimer) {
+      state.pollTimer = setInterval(() => {
+        void pollActiveJob();
       }, TUI_JOB_POLL_INTERVAL_MS);
+    }
+  };
 
-      return () => {
-        canceled = true;
-        clearInterval(timer);
-      };
-    }, [activeJob?.id, activeJob?.status, appendEventLog, refresh, remoteReady]);
+  const submitPrompt = async (promptText) => {
+    const prompt = String(promptText ?? "").trim();
+    if (!prompt) {
+      printStatusLine("prompt is empty");
+      return;
+    }
+    if (!remoteReady) {
+      printStatusLine("missing ORCH_GATEWAY_TOKEN (set it in .env)");
+      return;
+    }
+    if (state.activeJob && !isTerminalJobStatus(state.activeJob.status)) {
+      printStatusLine(`job ${state.activeJob.id} is still active; use /status or /abort`);
+      return;
+    }
 
-    useInput((input, key) => {
-      if (key.ctrl && key.name === "c") {
-        exit();
-        return;
-      }
-      if (isComposing) {
-        if (key.escape) {
-          setIsComposing(false);
-          setNotice("compose canceled");
-          return;
-        }
-        if (key.name === "return" || key.name === "enter") {
-          const prompt = composer.trim();
-          if (!prompt) {
-            setIsComposing(false);
-            setNotice("empty prompt");
-            return;
-          }
-          setIsComposing(false);
-          setComposer("");
-          void submitPrompt(prompt);
-          return;
-        }
-        if (key.name === "backspace" || key.name === "delete") {
-          setComposer((previous) => previous.slice(0, -1));
-          return;
-        }
-        if (!key.ctrl && !key.meta && typeof input === "string" && input.length > 0) {
-          setComposer((previous) => `${previous}${input}`);
-        }
-        return;
-      }
-
-      if (input === "q" || key.escape) {
-        exit();
-        return;
-      }
-      if (input === "r") {
-        refresh();
-        setNotice("refreshed");
-        return;
-      }
-      if (input === "m") {
-        const nextMode = mode === "mock" ? "rpc" : "mock";
-        setMode(nextMode);
-        refresh(nextMode);
-        setNotice(`mode=${nextMode}`);
-        return;
-      }
-      if (input === "i") {
-        setShowIssues((value) => !value);
-        return;
-      }
-      if (input === "e") {
-        setIsComposing(true);
-        setNotice(`compose ${jobKind} prompt`);
-        return;
-      }
-      if (input === "k") {
-        setJobKind((current) => {
-          const next = current === "task" ? "run" : "task";
-          setNotice(`kind=${next}`);
-          return next;
-        });
-        return;
-      }
-      if (input === "a") {
-        void approveActiveJob();
-        return;
-      }
-      if (input === "x") {
-        void abortActiveJob();
-        return;
-      }
-      if (input === "c") {
-        setEventLog([]);
-        setNotice("console cleared");
-      }
+    const job = await tuiCreateJob(remoteContext, {
+      kind: state.kind,
+      prompt
     });
+    const active = {
+      id: String(job.id ?? ""),
+      kind: String(job.kind ?? state.kind),
+      status: String(job.status ?? "queued"),
+      cursor: 0,
+      resultText: String(job.resultText ?? ""),
+      error: String(job.error ?? "")
+    };
+    setActiveJob(active);
+    printStatusLine(`[${formatTuiClock()}] created ${active.id} (${active.status})`);
+    if (active.status === "needs_approval") {
+      printStatusLine("this run needs approval; use /approve");
+    }
+    await pollActiveJob();
+  };
 
-    const doctorColor = snapshot.issues.length === 0 ? "green" : "yellow";
-    const skillColor = snapshot.missingSkillEnv.length === 0 ? "green" : "yellow";
-    const mcpColor = snapshot.mcpTargets > 0 ? "green" : "yellow";
-    const remoteColor = remoteReady ? "green" : "yellow";
-    const activeStatus = activeJob?.status ?? "idle";
-    const activeStatusColor = getTuiJobStatusColor(activeStatus);
-    const outputValue = String(activeJob?.resultText || activeJob?.error || "");
-    const outputPreview = summarizeTuiText(outputValue, TUI_OUTPUT_PREVIEW_CHARS);
-    const eventPreview = eventLog.slice(-8);
+  const approveActiveJob = async () => {
+    if (!state.activeJob?.id) {
+      printStatusLine("no active job");
+      return;
+    }
+    if (state.activeJob.status !== "needs_approval") {
+      printStatusLine(`active job status is '${state.activeJob.status}', not needs_approval`);
+      return;
+    }
+    const job = await tuiApproveJob(remoteContext, state.activeJob.id);
+    state.activeJob.status = String(job.status ?? state.activeJob.status);
+    printStatusLine(`[${formatTuiClock()}] approved ${state.activeJob.id}`);
+    await pollActiveJob();
+  };
 
-    return React.createElement(
-      Box,
-      { flexDirection: "column", paddingX: 1, paddingY: 1 },
-      React.createElement(Text, { color: "cyan", bold: true }, "Butler TUI (Operator Console)"),
-      React.createElement(Text, null, `Mode: ${mode} | Kind: ${jobKind} | Last refresh: ${snapshot.refreshedAt}`),
-      React.createElement(
-        Text,
-        { color: remoteColor },
-        `Remote: ${remoteContext.baseUrl} | gateway token: ${remoteReady ? "ready" : "missing/short"}`
-      ),
-      React.createElement(
-        Text,
-        { color: "gray" },
-        `Identity: chat=${remoteContext.chatId} requester=${remoteContext.requesterId} session=${remoteContext.sessionKey}${
-          remoteContext.threadId ? ` thread=${remoteContext.threadId}` : ""
-        }`
-      ),
-      React.createElement(Text, { color: doctorColor }, `Doctor: ${snapshot.issues.length === 0 ? "ok" : `${snapshot.issues.length} issue(s)`}`),
-      React.createElement(
-        Text,
-        { color: skillColor },
-        `Skills: ${snapshot.enabledSkills}/${snapshot.totalSkills} enabled, missing env=${snapshot.missingSkillEnv.length}`
-      ),
-      React.createElement(
-        Text,
-        { color: mcpColor },
-        `MCP: targets=${snapshot.mcpTargets}, wrappers=${snapshot.mcpWrappers}, config=${snapshot.mcpConfigStatus}`
-      ),
-      activeJob
-        ? React.createElement(
-            Text,
-            { color: activeStatusColor },
-            `Active job: ${activeJob.id} (${activeJob.status})${activeJob.requiresApproval ? " requires approval" : ""}`
-          )
-        : React.createElement(Text, { color: "gray" }, "Active job: none"),
-      activeJob && activeJob.status === "needs_approval"
-        ? React.createElement(Text, { color: "yellow" }, "Use 'a' to approve this run job.")
-        : null,
-      outputPreview
-        ? React.createElement(
-            Box,
-            { flexDirection: "column", marginTop: 1 },
-            React.createElement(Text, { color: "cyan" }, "Output preview:"),
-            React.createElement(Text, { key: "out-0" }, outputPreview)
-          )
-        : null,
-      eventPreview.length > 0
-        ? React.createElement(
-            Box,
-            { flexDirection: "column", marginTop: 1 },
-            React.createElement(Text, { color: "cyan" }, "Event stream:"),
-            ...eventPreview.map((line, index) => React.createElement(Text, { key: `ev-${index}`, color: "gray" }, line))
-          )
-        : null,
-      React.createElement(Text, null, "Console commands:"),
-      React.createElement(Text, { color: "gray" }, `  npm run butler -- doctor --mode ${mode}`),
-      React.createElement(Text, { color: "gray" }, `  npm run butler -- up --mode ${mode}`),
-      React.createElement(Text, { color: "gray" }, "  npm run butler -- skills list"),
-      React.createElement(Text, { color: "gray" }, "  npm run butler -- mcp list"),
-      isComposing
-        ? React.createElement(Text, { color: "cyan" }, `Compose (${jobKind}) > ${composer}█`)
-        : React.createElement(Text, { color: "gray" }, "Press 'e' to compose and submit a prompt."),
-      React.createElement(Text, null, "Quick commands:"),
-      React.createElement(Text, { color: "gray" }, "  e compose prompt | enter submit | esc cancel"),
-      React.createElement(Text, { color: "gray" }, "  k toggle kind task/run | a approve | x abort"),
-      React.createElement(Text, { color: "gray" }, "  r refresh | m mode | i details | c clear log | q quit"),
-      showIssues && snapshot.issues.length > 0
-        ? React.createElement(
-            Box,
-            { flexDirection: "column", marginTop: 1 },
-            React.createElement(Text, { color: "yellow" }, "Doctor issues:"),
-            ...snapshot.issues.slice(0, 8).map((issue, index) =>
-              React.createElement(Text, { key: `issue-${index}`, color: "yellow" }, `- ${issue}`)
-            )
-          )
-        : null,
-      showIssues && snapshot.missingSkillEnv.length > 0
-        ? React.createElement(
-            Box,
-            { flexDirection: "column", marginTop: 1 },
-            React.createElement(Text, { color: "yellow" }, "Missing skill env:"),
-            ...snapshot.missingSkillEnv.slice(0, 8).map((entry, index) =>
-              React.createElement(Text, { key: `env-${index}`, color: "yellow" }, `- ${entry}`)
-            )
-          )
-        : null,
-      React.createElement(
-        Text,
-        { color: "gray" },
-        "OpenClaw-style loop: compose -> submit -> stream -> approve/abort -> inspect output"
-      ),
-      notice ? React.createElement(Text, { color: "gray" }, `Last action: ${notice}`) : null
-    );
+  const abortActiveJob = async () => {
+    if (!state.activeJob?.id) {
+      printStatusLine("no active job");
+      return;
+    }
+    const job = await tuiAbortJob(remoteContext, state.activeJob.id);
+    state.activeJob.status = String(job.status ?? state.activeJob.status);
+    printStatusLine(`[${formatTuiClock()}] abort requested for ${state.activeJob.id}`);
+    await pollActiveJob();
+  };
+
+  const printJobSummary = (job) => {
+    if (!job) {
+      printStatusLine("no job yet");
+      return;
+    }
+    const details = `id=${job.id} kind=${job.kind} status=${job.status}`;
+    printStatusLine(details);
+  };
+
+  const pollActiveJob = async () => {
+    if (!state.activeJob?.id || state.pollInFlight || isTerminalJobStatus(state.activeJob.status)) {
+      return;
+    }
+    state.pollInFlight = true;
+    try {
+      const current = state.activeJob;
+      const eventsPayload = await tuiGetJobEvents(remoteContext, current.id, current.cursor);
+      const events = Array.isArray(eventsPayload?.events) ? eventsPayload.events : [];
+      const nextCursor = Number(eventsPayload?.nextCursor);
+      if (Number.isFinite(nextCursor) && nextCursor >= 0) {
+        current.cursor = Math.floor(nextCursor);
+      }
+      for (const event of events) {
+        current.resultText += extractAgentDelta(event);
+      }
+
+      const latest = await tuiGetJob(remoteContext, current.id);
+      const previousStatus = current.status;
+      current.status = String(latest.status ?? current.status);
+      current.resultText = String(latest.resultText ?? current.resultText ?? "");
+      current.error = String(latest.error ?? current.error ?? "");
+
+      if (current.status !== previousStatus) {
+        printStatusLine(`[${formatTuiClock()}] ${current.id} -> ${current.status}`);
+        renderPrompt();
+      }
+
+      if (isTerminalJobStatus(current.status)) {
+        stopPolling();
+        state.lastJob = { ...current };
+        setActiveJob(null);
+        if (current.resultText.trim()) {
+          printStatusLine(`result:\n${current.resultText.trim()}`);
+        } else if (current.error.trim()) {
+          printStatusLine(`error: ${current.error.trim()}`);
+        } else {
+          printStatusLine(`job ${current.id} finished with no output`);
+        }
+        renderPrompt();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      printStatusLine(`poll failed: ${summarizeTuiText(message, 260)}`);
+      renderPrompt();
+    } finally {
+      state.pollInFlight = false;
+    }
+  };
+
+  const printHelp = () => {
+    printLine("Commands:");
+    printLine("  /help                 show this help");
+    printLine("  /kind task|run        set default kind for next prompts");
+    printLine("  /status               show current job status");
+    printLine("  /approve              approve active run job");
+    printLine("  /abort                abort active job");
+    printLine("  /quit                 exit");
+    printLine("Any non-command text submits a prompt.");
+  };
+
+  const runCommand = async (line) => {
+    const text = String(line ?? "").trim();
+    if (!text) {
+      return;
+    }
+
+    if (!text.startsWith("/")) {
+      await submitPrompt(text);
+      return;
+    }
+
+    const [command, ...rest] = text.slice(1).trim().split(/\s+/);
+    const name = String(command ?? "").toLowerCase();
+    const args = rest.join(" ").trim();
+
+    if (name === "help" || name === "h") {
+      printHelp();
+      return;
+    }
+    if (name === "quit" || name === "q" || name === "exit") {
+      rl.close();
+      return;
+    }
+    if (name === "kind") {
+      if (!args) {
+        printStatusLine(`current kind=${state.kind}`);
+        return;
+      }
+      state.kind = parseTuiJobKind(args);
+      printStatusLine(`kind=${state.kind}`);
+      return;
+    }
+    if (name === "status") {
+      printJobSummary(state.activeJob ?? state.lastJob);
+      return;
+    }
+    if (name === "approve") {
+      await approveActiveJob();
+      return;
+    }
+    if (name === "abort") {
+      await abortActiveJob();
+      return;
+    }
+    if (name === "task" || name === "run") {
+      state.kind = parseTuiJobKind(name);
+      if (!args) {
+        printStatusLine(`kind=${state.kind}`);
+        return;
+      }
+      await submitPrompt(args);
+      return;
+    }
+
+    printStatusLine(`unknown command '/${name}'. Use /help.`);
+  };
+
+  printLine("Butler TUI (Minimal)");
+  printLine(`Remote: ${remoteContext.baseUrl}`);
+  printLine(
+    `Identity: chat=${remoteContext.chatId} requester=${remoteContext.requesterId} session=${remoteContext.sessionKey}${
+      remoteContext.threadId ? ` thread=${remoteContext.threadId}` : ""
+    }`
+  );
+  printLine("Type a prompt and press Enter. Use /help for commands.");
+  if (!remoteReady) {
+    printLine("Warning: ORCH_GATEWAY_TOKEN is missing/short; submit will fail until fixed.");
+  }
+  printLine("");
+
+  if (initialMessage) {
+    await submitPrompt(initialMessage);
   }
 
-  const app = render(React.createElement(ButlerTuiApp), { exitOnCtrlC: false });
-  await app.waitUntilExit();
-}
+  rl.on("line", async (line) => {
+    if (state.commandInFlight) {
+      printStatusLine("busy; wait for current command to finish");
+      return;
+    }
+    state.commandInFlight = true;
+    try {
+      await runCommand(line);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      printStatusLine(`command failed: ${summarizeTuiText(message, 260)}`);
+    } finally {
+      state.commandInFlight = false;
+      renderPrompt();
+    }
+  });
 
-function getTuiJobStatusColor(status) {
-  if (status === "completed") {
-    return "green";
-  }
-  if (status === "failed") {
-    return "red";
-  }
-  if (status === "needs_approval" || status === "aborting" || status === "aborted") {
-    return "yellow";
-  }
-  if (status === "running") {
-    return "cyan";
-  }
-  return "gray";
+  rl.on("SIGINT", () => {
+    rl.close();
+  });
+
+  renderPrompt();
+  await new Promise((resolvePromise) => {
+    rl.on("close", () => {
+      stopPolling();
+      resolvePromise();
+    });
+  });
 }
 
 function isTerminalJobStatus(status) {
@@ -1105,25 +904,6 @@ function summarizeTuiText(value, maxChars) {
 function extractAgentDelta(event) {
   const delta = event?.data?.delta;
   return typeof delta === "string" ? delta : "";
-}
-
-function formatTuiEventLine(event) {
-  const ts = formatTuiClock(event?.ts);
-  const type = String(event?.type ?? "event");
-  if (type === "agent_text_delta") {
-    const delta = summarizeTuiText(extractAgentDelta(event), TUI_EVENT_PREVIEW_CHARS);
-    return `${ts} delta ${delta || "(empty)"}`;
-  }
-  if (type === "tool_start") {
-    const tool = summarizeTuiText(String(event?.data?.tool ?? event?.message ?? "unknown"), TUI_EVENT_PREVIEW_CHARS);
-    return `${ts} tool:start ${tool}`;
-  }
-  if (type === "tool_end") {
-    const tool = summarizeTuiText(String(event?.data?.tool ?? event?.message ?? "unknown"), TUI_EVENT_PREVIEW_CHARS);
-    return `${ts} tool:end ${tool}`;
-  }
-  const message = summarizeTuiText(String(event?.message ?? ""), TUI_EVENT_PREVIEW_CHARS);
-  return message ? `${ts} ${type}: ${message}` : `${ts} ${type}`;
 }
 
 async function tuiCreateJob(remoteContext, input) {
@@ -1238,86 +1018,6 @@ async function tuiOrchestratorRequest(remoteContext, path, init) {
     return response.json();
   } finally {
     clearTimeout(timeout);
-  }
-}
-
-function collectTuiSnapshot(mode) {
-  const issues = runDoctor({
-    mode,
-    includeGateway: true,
-    includeWorker: true,
-    includeOrchestrator: true,
-    strict: false
-  });
-
-  const skillsDir = resolve(process.cwd(), DEFAULT_SKILLS_DIR);
-  const skillsConfigPath = resolve(process.cwd(), DEFAULT_SKILLS_CONFIG_PATH);
-  const discovered = discoverSkills({
-    workspaceRoot: process.cwd(),
-    skillsDir
-  });
-  const config = loadSkillsConfig(skillsConfigPath);
-  const enabled = resolveEnabledSkills(discovered, config);
-  const envSources = {
-    ...readEnvMap(resolve(process.cwd(), ".env")),
-    ...process.env
-  };
-  const missingSkillEnv = enabled.flatMap((skill) =>
-    (skill.env ?? [])
-      .filter((name) => !String(envSources[name] ?? "").trim())
-      .map((name) => `${skill.id}:${name}`)
-  );
-
-  const mcpSpecPath = resolve(process.cwd(), DEFAULT_MCP_SPEC_PATH);
-  const mcpSpec = readJsonFileSafe(mcpSpecPath);
-  const mcpTargets = Array.isArray(mcpSpec?.targets) ? mcpSpec.targets.length : 0;
-
-  const mcpBinDir = resolve(process.cwd(), DEFAULT_MCP_BIN_DIR);
-  const mcpWrappers = countExecutableEntries(mcpBinDir);
-
-  return {
-    issues,
-    totalSkills: discovered.length,
-    enabledSkills: enabled.length,
-    missingSkillEnv,
-    mcpTargets,
-    mcpWrappers,
-    mcpConfigStatus: existsSync(mcpSpecPath) ? "present" : "missing",
-    refreshedAt: new Date().toISOString()
-  };
-}
-
-function readJsonFileSafe(path) {
-  if (!existsSync(path)) {
-    return null;
-  }
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function countExecutableEntries(dirPath) {
-  if (!existsSync(dirPath)) {
-    return 0;
-  }
-
-  try {
-    return readdirSync(dirPath).reduce((count, name) => {
-      const candidate = resolve(dirPath, name);
-      try {
-        const stats = statSync(candidate);
-        if (!stats.isFile()) {
-          return count;
-        }
-        return count + 1;
-      } catch {
-        return count;
-      }
-    }, 0);
-  } catch {
-    return 0;
   }
 }
 
@@ -2573,6 +2273,21 @@ function pipeWithPrefix(name, input, output) {
   rl.on("line", (line) => {
     output.write(`[${name}] ${line}\n`);
   });
+}
+
+function resolveDefaultExecMode() {
+  const explicit = String(process.env.PI_EXEC_MODE ?? "")
+    .trim()
+    .toLowerCase();
+  if (explicit === "mock" || explicit === "rpc") {
+    return explicit;
+  }
+
+  const binary = process.env.PI_BINARY ?? "pi";
+  const check = spawnSync("bash", ["-lc", `command -v ${shellEscape(binary)} >/dev/null 2>&1`], {
+    cwd: process.cwd()
+  });
+  return check.status === 0 ? "rpc" : "mock";
 }
 
 function parseMode(raw) {
