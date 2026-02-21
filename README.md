@@ -74,6 +74,7 @@ npm run test:gateway
 - `/approvepair <code>`: approve pairing code (owner-only)
 
 Plain text is treated as `/task`.
+Voice notes, audio files, and photos are also treated as `/task` when media understanding is enabled (default: enabled).
 
 ## Butler CLI (recommended)
 
@@ -99,6 +100,7 @@ For automation (CI/provisioning), use non-interactive flags:
 npm run butler -- setup --yes \
   --bot-token "<bot-token>" \
   --owner-ids "<telegram-user-id>" \
+  --openai-api-key "<openai-api-key>" \
   --gateway-token "<16+ char secret>" \
   --worker-token "<16+ char secret>"
 ```
@@ -108,6 +110,7 @@ Optional skill onboarding flags for setup:
 - `--skill-env KEY=VALUE` (repeatable) to provide required skill env vars (for example `ACCESS_TOKEN` for Readwise).
 - `--sync-selected-skills` to run MCP wrapper generation for selected MCP-backed skills during setup.
 - `--flow quickstart|manual` to choose onboarding style (`quickstart` asks fewer questions).
+- `--disable-media` to disable voice/photo understanding (enabled by default).
 - when `gmail`/`google-calendar` are selected, setup checks `gog` auth status and can launch `gog auth login` interactively.
 - if `gog` OAuth client credentials are missing, setup explains where to create them (Google Cloud Console) and can run `gog auth credentials set <credentials.json>`.
 - setup can optionally write `GOG_ACCOUNT=<email>` to pin a default Google account for `gog`.
@@ -124,6 +127,15 @@ ORCH_GATEWAY_TOKEN=your-strong-secret-16+chars
 ORCH_WORKER_TOKEN=your-strong-secret-16+chars
 TELEGRAM_BOT_TOKEN=<botfather-token>
 TG_OWNER_IDS=<your-telegram-user-id>
+# media understanding defaults to enabled and requires OPENAI_API_KEY
+TG_MEDIA_ENABLED=true
+OPENAI_API_KEY=<openai-api-key>
+# optional media model/limits
+# TG_MEDIA_STT_MODEL=gpt-4o-mini-transcribe
+# TG_MEDIA_VISION_MODEL=gpt-5-mini
+# TG_MEDIA_MAX_FILE_MB=20
+# TG_MEDIA_TRANSCRIPT_MAX_CHARS=6000
+# TG_MEDIA_VISION_MAX_CHARS=4000
 # optional: override session context store path
 TG_SESSIONS_FILE=.data/gateway/sessions.json
 # optional: only send final agent text in Telegram (default true)
@@ -405,6 +417,7 @@ Worker runtime env options:
   - non-owner can only view own jobs in same chat
   - abort by requester is configurable (`TG_ALLOW_REQUESTER_ABORT`)
 - Built-in rate limiting (`TG_RATE_LIMIT_PER_MIN`) and prompt length cap (`TG_PROMPT_MAX_CHARS`)
+- Media understanding for voice/audio/photo is enabled by default (`TG_MEDIA_ENABLED=true`) and requires `OPENAI_API_KEY`
 - Global panic switch (`/panic on`) pauses worker claims
 - Session context is isolated per `chatId + threadId` and can be rotated with `/new` or `/reset`
 - Telegram output defaults to agent-only text (`TG_ONLY_AGENT_OUTPUT=true`), suppressing queue/ops chatter

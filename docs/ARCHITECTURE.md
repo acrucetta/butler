@@ -57,7 +57,8 @@ flowchart TB
 
 ## Component responsibilities
 
-- `telegram-gateway` handles Telegram commands, pairing, role checks, rate limits, and job status updates.
+- `telegram-gateway` handles Telegram commands/media messages, pairing, role checks, rate limits, and job status updates.
+- Media updates (voice/audio/photo) are converted into text context in gateway before creating jobs.
 - `orchestrator` is the source of truth for job state, queueing, event history, and global pause state.
 - `orchestrator` also hosts proactive trigger runtime (heartbeats, cron rules, webhook ingress) and enqueues regular jobs.
 - `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
@@ -159,6 +160,7 @@ The code follows the same boundaries shown above:
 - Pairing gate for unknown Telegram users.
 - Owner allowlist required (`TG_OWNER_IDS`).
 - Strong API secrets required for gateway/worker orchestration (`16+` chars).
+- Media understanding defaults to enabled (`TG_MEDIA_ENABLED=true`) and requires `OPENAI_API_KEY`.
 - `/run` is owner-only by default and always requires approval.
 - Non-owner users can only view their own jobs in their own chat.
 - Optional requester abort is configurable.

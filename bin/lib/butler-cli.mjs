@@ -59,6 +59,9 @@ export async function runButlerCli(options = {}) {
     .option("--gateway-token <value>", "orchestrator gateway secret (16+ chars)")
     .option("--worker-token <value>", "orchestrator worker secret (16+ chars)")
     .option("--orch-base-url <value>", "orchestrator base URL", "http://127.0.0.1:8787")
+    .option("--enable-media", "enable Telegram voice/photo understanding")
+    .option("--disable-media", "disable Telegram voice/photo understanding")
+    .option("--openai-api-key <value>", "OpenAI API key used for media transcription/vision")
     .option(
       "--skills <ids>",
       "comma-separated prebuilt skills to set explicitly (e.g. readwise,gmail); disables other prebuilt skills"
@@ -833,7 +836,15 @@ async function runSetupTelegram(cmdOptions, cliName) {
     ORCH_WORKER_TOKEN: coalesce(cmdOptions.workerToken, process.env.ORCH_WORKER_TOKEN, fileVars.ORCH_WORKER_TOKEN),
     TELEGRAM_BOT_TOKEN: coalesce(cmdOptions.botToken, process.env.TELEGRAM_BOT_TOKEN, fileVars.TELEGRAM_BOT_TOKEN),
     TG_OWNER_IDS: coalesce(cmdOptions.ownerIds, process.env.TG_OWNER_IDS, fileVars.TG_OWNER_IDS),
-    ORCH_BASE_URL: coalesce(cmdOptions.orchBaseUrl, process.env.ORCH_BASE_URL, fileVars.ORCH_BASE_URL, "http://127.0.0.1:8787")
+    ORCH_BASE_URL: coalesce(cmdOptions.orchBaseUrl, process.env.ORCH_BASE_URL, fileVars.ORCH_BASE_URL, "http://127.0.0.1:8787"),
+    TG_MEDIA_ENABLED: coalesce(
+      cmdOptions.disableMedia ? "false" : undefined,
+      cmdOptions.enableMedia ? "true" : undefined,
+      process.env.TG_MEDIA_ENABLED,
+      fileVars.TG_MEDIA_ENABLED,
+      "true"
+    ),
+    OPENAI_API_KEY: coalesce(cmdOptions.openaiApiKey, process.env.OPENAI_API_KEY, fileVars.OPENAI_API_KEY)
   };
 
   if (!values.ORCH_GATEWAY_TOKEN) {
@@ -847,10 +858,10 @@ async function runSetupTelegram(cmdOptions, cliName) {
     if (interactive && prompter) {
       await prompter.note(
         [
-          "Step 1/3: Telegram access",
-          "Create bot token with @BotFather (/newbot), then provide owner Telegram IDs."
+          "Step 1/2: Access credentials",
+          "Create bot token with @BotFather (/newbot), then provide owner IDs and OpenAI key."
         ].join("\n"),
-        "Telegram"
+        "Credentials"
       );
 
       values.TELEGRAM_BOT_TOKEN = await prompter.text({
@@ -863,9 +874,21 @@ async function runSetupTelegram(cmdOptions, cliName) {
         initialValue: values.TG_OWNER_IDS,
         required: true
       });
+      const enableMedia = await prompter.confirm({
+        message: "Enable voice/photo understanding in Telegram gateway?",
+        initialValue: parseBooleanLike(values.TG_MEDIA_ENABLED)
+      });
+      values.TG_MEDIA_ENABLED = enableMedia ? "true" : "false";
+      values.OPENAI_API_KEY = enableMedia
+        ? await prompter.text({
+            message: "OPENAI_API_KEY (required when media is enabled)",
+            initialValue: values.OPENAI_API_KEY,
+            required: true
+          })
+        : "";
 
       if (selectedFlow === "manual") {
-        await prompter.note("Step 2/3: Runtime secrets and endpoint", "Runtime");
+        await prompter.note("Step 2/2: Runtime secrets and endpoint", "Runtime");
         values.ORCH_GATEWAY_TOKEN = await prompter.text({
           message: "ORCH_GATEWAY_TOKEN (16+ chars)",
           initialValue: values.ORCH_GATEWAY_TOKEN,
@@ -883,7 +906,7 @@ async function runSetupTelegram(cmdOptions, cliName) {
         });
       } else {
         await prompter.note(
-          "Step 2/3: Quickstart selected. Using generated/default runtime values.",
+          "Step 2/2: Quickstart selected. Using generated/default runtime values.",
           "Runtime"
         );
       }
@@ -934,6 +957,8 @@ async function runSetupTelegram(cmdOptions, cliName) {
     TELEGRAM_BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
     TG_OWNER_IDS: values.TG_OWNER_IDS,
     ORCH_BASE_URL: values.ORCH_BASE_URL,
+    TG_MEDIA_ENABLED: values.TG_MEDIA_ENABLED,
+    OPENAI_API_KEY: values.OPENAI_API_KEY,
     ...skillSetup.envUpdates
   });
 
@@ -943,6 +968,10 @@ async function runSetupTelegram(cmdOptions, cliName) {
   console.log(`- TELEGRAM_BOT_TOKEN=${maskSecret(values.TELEGRAM_BOT_TOKEN)}`);
   console.log(`- TG_OWNER_IDS=${values.TG_OWNER_IDS}`);
   console.log(`- ORCH_BASE_URL=${values.ORCH_BASE_URL}`);
+  console.log(`- TG_MEDIA_ENABLED=${values.TG_MEDIA_ENABLED}`);
+  if (values.OPENAI_API_KEY) {
+    console.log(`- OPENAI_API_KEY=${maskSecret(values.OPENAI_API_KEY)}`);
+  }
   if (skillSetup.enabledPrebuilt.length > 0) {
     console.log(`- PREBUILT_SKILLS_ENABLED=${skillSetup.enabledPrebuilt.join(",")}`);
   }
@@ -1982,6 +2011,13 @@ function parseMode(raw) {
   throw new Error(`Invalid mode '${raw}'. Expected 'mock' or 'rpc'.`);
 }
 
+function parseBooleanLike(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 function runDoctor(input) {
   const issues = [];
 
@@ -1996,6 +2032,9 @@ function runDoctor(input) {
   if (input.includeGateway) {
     requireValue("TELEGRAM_BOT_TOKEN", process.env.TELEGRAM_BOT_TOKEN, issues);
     requireValue("TG_OWNER_IDS", process.env.TG_OWNER_IDS, issues);
+    if (parseBooleanLike(coalesce(process.env.TG_MEDIA_ENABLED, "true"))) {
+      requireValue("OPENAI_API_KEY", process.env.OPENAI_API_KEY, issues);
+    }
   }
 
   if (input.includeWorker && input.mode === "rpc") {
@@ -2024,6 +2063,10 @@ function validateSetupValues(values) {
     if (value.length > 0 && value.length < 16) {
       issues.push(`${key} must be at least 16 characters`);
     }
+  }
+
+  if (parseBooleanLike(values.TG_MEDIA_ENABLED) && !String(values.OPENAI_API_KEY ?? "").trim()) {
+    issues.push("OPENAI_API_KEY is required when TG_MEDIA_ENABLED=true");
   }
 
   return issues;

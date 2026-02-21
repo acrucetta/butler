@@ -6,6 +6,14 @@ import { PairingStore } from "./pairing-store.js";
 import { SessionStore } from "./session-store.js";
 import { toTelegramMarkdownV2 } from "./telegram-markdown.js";
 
+interface ChatCompletionsResponse {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
+}
+
 class SlidingWindowRateLimiter {
   private readonly buckets = new Map<string, number[]>();
 
@@ -49,6 +57,15 @@ const allowRequesterAbort = parseBoolean(process.env.TG_ALLOW_REQUESTER_ABORT, t
 const notifyToolEvents = parseBoolean(process.env.TG_NOTIFY_TOOL_EVENTS, false);
 const onlyAgentOutput = parseBoolean(process.env.TG_ONLY_AGENT_OUTPUT, true);
 const agentMarkdownV2 = parseBoolean(process.env.TG_AGENT_MARKDOWNV2, true);
+const mediaEnabled = parseBoolean(process.env.TG_MEDIA_ENABLED, true);
+const mediaMaxFileMb = parsePositiveInt(process.env.TG_MEDIA_MAX_FILE_MB, 20);
+const mediaMaxFileBytes = mediaMaxFileMb * 1024 * 1024;
+const mediaTranscriptMaxChars = parsePositiveInt(process.env.TG_MEDIA_TRANSCRIPT_MAX_CHARS, 6_000);
+const mediaVisionMaxChars = parsePositiveInt(process.env.TG_MEDIA_VISION_MAX_CHARS, 4_000);
+const mediaSttModel = process.env.TG_MEDIA_STT_MODEL?.trim() || "gpt-4o-mini-transcribe";
+const mediaVisionModel = process.env.TG_MEDIA_VISION_MODEL?.trim() || "gpt-5-mini";
+const mediaOpenAiApiKey = process.env.OPENAI_API_KEY?.trim() || "";
+const mediaOpenAiBaseUrl = normalizeOpenAiBaseUrl(process.env.OPENAI_BASE_URL);
 const proactiveDeliveryPollMs = parsePositiveInt(process.env.TG_PROACTIVE_DELIVERY_POLL_MS, 3_000);
 const owners = splitCsv(process.env.TG_OWNER_IDS ?? "");
 const allowFrom = splitCsv(process.env.TG_ALLOW_FROM ?? "");
@@ -57,6 +74,10 @@ const sessionsFile = process.env.TG_SESSIONS_FILE ?? ".data/gateway/sessions.jso
 
 if (owners.length === 0) {
   throw new Error("TG_OWNER_IDS must include at least one Telegram user ID");
+}
+
+if (mediaEnabled && !mediaOpenAiApiKey) {
+  throw new Error("TG_MEDIA_ENABLED=true requires OPENAI_API_KEY");
 }
 
 const bot = new Bot(botToken);
@@ -251,6 +272,69 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
+bot.on("message:voice", async (ctx) => {
+  await handleVoiceOrAudioMessage(ctx, "voice");
+});
+
+bot.on("message:audio", async (ctx) => {
+  await handleVoiceOrAudioMessage(ctx, "audio");
+});
+
+bot.on("message:photo", async (ctx) => {
+  try {
+    const fromId = String(ctx.from?.id ?? "");
+    if (!fromId) {
+      return;
+    }
+
+    if (!pairings.isAllowed(fromId)) {
+      await handleUnpairedMessage(ctx, fromId);
+      return;
+    }
+
+    if (!mediaEnabled) {
+      await ctx.reply("Photo understanding is disabled. Set TG_MEDIA_ENABLED=true to enable media processing.");
+      return;
+    }
+
+    const photo = selectLargestPhoto(ctx.message.photo ?? []);
+    if (!photo?.file_id) {
+      await ctx.reply("Could not read photo payload from Telegram.");
+      return;
+    }
+
+    if (typeof photo.file_size === "number" && photo.file_size > mediaMaxFileBytes) {
+      await ctx.reply(`Photo is too large (${formatMb(photo.file_size)} MB). Max allowed is ${mediaMaxFileMb} MB.`);
+      return;
+    }
+
+    const file = await downloadTelegramFile(photo.file_id);
+    if (file.bytes.length > mediaMaxFileBytes) {
+      await ctx.reply(`Photo is too large (${formatMb(file.bytes.length)} MB). Max allowed is ${mediaMaxFileMb} MB.`);
+      return;
+    }
+
+    const caption = (ctx.message.caption ?? "").trim();
+    const analysis = await generateImageAnalysis(file.bytes, file.mimeType ?? "image/jpeg");
+    const prompt = buildPhotoPrompt(
+      truncateText(analysis, mediaVisionMaxChars, "photo analysis"),
+      caption
+    );
+
+    const limited = await enforcePromptPolicies(ctx, fromId, prompt);
+    if (!limited) {
+      return;
+    }
+
+    await submitJob(ctx, prompt, "task", false, {
+      telegramInputType: "photo",
+      telegramMediaMimeType: file.mimeType ?? "image/jpeg"
+    });
+  } catch (error) {
+    await ctx.reply(`Request failed: ${formatError(error)}`);
+  }
+});
+
 bot.catch((error) => {
   console.error("[gateway] bot error", error.error);
 });
@@ -350,7 +434,266 @@ async function handleResetSession(
   await submitJob(ctx, promptAfterReset, "task", false);
 }
 
-async function submitJob(ctx: any, prompt: string, kind: "task" | "run", requiresApproval: boolean): Promise<void> {
+async function handleVoiceOrAudioMessage(ctx: any, inputType: "voice" | "audio"): Promise<void> {
+  try {
+    const fromId = String(ctx.from?.id ?? "");
+    if (!fromId) {
+      return;
+    }
+
+    if (!pairings.isAllowed(fromId)) {
+      await handleUnpairedMessage(ctx, fromId);
+      return;
+    }
+
+    if (!mediaEnabled) {
+      await ctx.reply("Voice and photo understanding is disabled. Set TG_MEDIA_ENABLED=true to enable media processing.");
+      return;
+    }
+
+    const payload = inputType === "voice" ? ctx.message.voice : ctx.message.audio;
+    if (!payload?.file_id) {
+      await ctx.reply("Could not read the audio payload from Telegram.");
+      return;
+    }
+
+    if (typeof payload.file_size === "number" && payload.file_size > mediaMaxFileBytes) {
+      await ctx.reply(`Audio file is too large (${formatMb(payload.file_size)} MB). Max allowed is ${mediaMaxFileMb} MB.`);
+      return;
+    }
+
+    const file = await downloadTelegramFile(payload.file_id);
+    if (file.bytes.length > mediaMaxFileBytes) {
+      await ctx.reply(`Audio file is too large (${formatMb(file.bytes.length)} MB). Max allowed is ${mediaMaxFileMb} MB.`);
+      return;
+    }
+
+    const transcript = await transcribeAudio(
+      file.bytes,
+      normalizeAudioUploadFilename(file.filePath, inputType),
+      file.mimeType ?? payload.mime_type ?? "audio/ogg"
+    );
+    const caption = (ctx.message.caption ?? "").trim();
+    const prompt = buildVoicePrompt(
+      truncateText(transcript, mediaTranscriptMaxChars, "voice transcript"),
+      caption,
+      inputType
+    );
+
+    const limited = await enforcePromptPolicies(ctx, fromId, prompt);
+    if (!limited) {
+      return;
+    }
+
+    const metadata: Record<string, string> = {
+      telegramInputType: inputType,
+      telegramMediaMimeType: file.mimeType ?? payload.mime_type ?? "audio/ogg"
+    };
+    if (typeof payload.duration === "number") {
+      metadata.telegramMediaDurationSeconds = String(payload.duration);
+    }
+
+    await submitJob(ctx, prompt, "task", false, metadata);
+  } catch (error) {
+    await ctx.reply(`Request failed: ${formatError(error)}`);
+  }
+}
+
+async function downloadTelegramFile(fileId: string): Promise<{ bytes: Buffer; filePath?: string; mimeType?: string }> {
+  const file = await bot.api.getFile(fileId);
+  if (!file.file_path) {
+    throw new Error("Telegram file path missing for media payload");
+  }
+
+  const response = await fetch(`https://api.telegram.org/file/bot${botToken}/${file.file_path}`);
+  if (!response.ok) {
+    throw new Error(`Telegram file download failed (${response.status})`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return {
+    bytes: buffer,
+    filePath: file.file_path,
+    mimeType: guessMimeTypeFromPath(file.file_path)
+  };
+}
+
+async function transcribeAudio(bytes: Buffer, filename: string, mimeType: string): Promise<string> {
+  const form = new FormData();
+  form.set("model", mediaSttModel);
+  form.set("file", new Blob([new Uint8Array(bytes)], { type: mimeType }), filename);
+
+  const response = await fetch(`${mediaOpenAiBaseUrl}/audio/transcriptions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${mediaOpenAiApiKey}`
+    },
+    body: form
+  });
+
+  if (!response.ok) {
+    throw new Error(`Audio transcription failed (${response.status}): ${await readErrorBody(response)}`);
+  }
+
+  const payload = (await response.json()) as { text?: string };
+  const text = payload.text?.trim();
+  if (!text) {
+    throw new Error("Audio transcription response was empty");
+  }
+
+  return text;
+}
+
+async function generateImageAnalysis(bytes: Buffer, mimeType: string): Promise<string> {
+  const imageDataUrl = `data:${mimeType};base64,${bytes.toString("base64")}`;
+
+  const response = await fetch(`${mediaOpenAiBaseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${mediaOpenAiApiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: mediaVisionModel,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You analyze Telegram photos for an assistant. Describe what is visible and extract any readable text. Be concise and factual."
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Analyze this Telegram photo and include key text visible in the image." },
+            { type: "image_url", image_url: { url: imageDataUrl } }
+          ]
+        }
+      ],
+      max_completion_tokens: 700
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Photo analysis failed (${response.status}): ${await readErrorBody(response)}`);
+  }
+
+  const payload = (await response.json()) as ChatCompletionsResponse;
+  const analysis = extractChatMessageText(payload);
+  if (!analysis) {
+    throw new Error("Photo analysis response was empty");
+  }
+
+  return analysis.trim();
+}
+
+function buildVoicePrompt(transcript: string, caption: string, inputType: "voice" | "audio"): string {
+  const lines = [
+    `Telegram ${inputType === "voice" ? "voice note" : "audio file"} received.`,
+    "Treat the transcript below as user input."
+  ];
+
+  if (caption) {
+    lines.push(`Telegram caption/context:\n${caption}`);
+  }
+
+  lines.push(`Transcript:\n${transcript}`);
+  return lines.join("\n\n");
+}
+
+function buildPhotoPrompt(analysis: string, caption: string): string {
+  const lines = [
+    "Telegram photo received.",
+    "Treat the analysis below as the user-provided visual context."
+  ];
+
+  if (caption) {
+    lines.push(`Telegram caption/context:\n${caption}`);
+  }
+
+  lines.push(`Photo analysis:\n${analysis}`);
+  return lines.join("\n\n");
+}
+
+function selectLargestPhoto(photos: any[]): any | undefined {
+  if (photos.length === 0) {
+    return undefined;
+  }
+
+  return photos.reduce((best, current) => {
+    if (!best) return current;
+    const bestSize = typeof best.file_size === "number" ? best.file_size : 0;
+    const currentSize = typeof current.file_size === "number" ? current.file_size : 0;
+    return currentSize >= bestSize ? current : best;
+  }, undefined as any);
+}
+
+function guessMimeTypeFromPath(filePath: string): string | undefined {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".ogg") || lower.endsWith(".oga")) return "audio/ogg";
+  if (lower.endsWith(".opus")) return "audio/ogg";
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".m4a")) return "audio/mp4";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return undefined;
+}
+
+function normalizeAudioUploadFilename(filePath: string | undefined, inputType: "voice" | "audio"): string {
+  const fallback = inputType === "voice" ? "voice.ogg" : "audio.mp3";
+  const leaf = filePath ? filePath.split("/").pop() ?? "" : "";
+  const candidate = leaf.trim() || fallback;
+  const lower = candidate.toLowerCase();
+
+  if (lower.endsWith(".oga")) {
+    return `${candidate.slice(0, -4)}.ogg`;
+  }
+  if (lower.endsWith(".opus")) {
+    return `${candidate.slice(0, -5)}.ogg`;
+  }
+  if (!/\.[a-z0-9]+$/i.test(candidate)) {
+    return inputType === "voice" ? `${candidate}.ogg` : `${candidate}.mp3`;
+  }
+
+  return candidate;
+}
+
+function formatMb(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+function truncateText(text: string, maxChars: number, label: string): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return `${text.slice(0, maxChars)}\n\n[${label} truncated to ${maxChars} characters]`;
+}
+
+function mergeJobMetadata(
+  ...entries: Array<Record<string, string> | undefined>
+): Record<string, string> | undefined {
+  const merged: Record<string, string> = {};
+  for (const entry of entries) {
+    if (!entry) continue;
+    for (const [key, value] of Object.entries(entry)) {
+      if (value.length > 0) {
+        merged[key] = value;
+      }
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+async function submitJob(
+  ctx: any,
+  prompt: string,
+  kind: "task" | "run",
+  requiresApproval: boolean,
+  metadata?: Record<string, string>
+): Promise<void> {
   const fromId = String(ctx.from?.id ?? "");
   const chatId = String(ctx.chat.id);
   const threadId = ctx.message.message_thread_id ? String(ctx.message.message_thread_id) : undefined;
@@ -367,7 +710,7 @@ async function submitJob(ctx: any, prompt: string, kind: "task" | "run", require
     requesterId: fromId,
     sessionKey,
     requiresApproval,
-    metadata: kind === "run" ? { command: prompt } : undefined
+    metadata: mergeJobMetadata(kind === "run" ? { command: prompt } : undefined, metadata)
   });
 
   if (requiresApproval) {
@@ -624,7 +967,8 @@ function helpText(): string {
     "/pairings - list pending pairings (owner)",
     "/approvepair <code> - approve pairing (owner)",
     "",
-    "Plain text is treated like /task"
+    "Plain text is treated like /task",
+    "Voice notes, audio files, and photos are treated like /task when media understanding is enabled"
   ].join("\n");
 }
 
@@ -717,6 +1061,39 @@ async function deliverProactiveJob(job: Job): Promise<string> {
   }
 
   throw new Error(`unsupported proactive delivery mode '${mode}'`);
+}
+
+function normalizeOpenAiBaseUrl(raw: string | undefined): string {
+  const value = raw?.trim();
+  if (!value) {
+    return "https://api.openai.com/v1";
+  }
+  return value.replace(/\/+$/g, "");
+}
+
+async function readErrorBody(response: Response): Promise<string> {
+  const text = (await response.text()).trim();
+  if (!text) {
+    return "(empty response body)";
+  }
+
+  return text.length > 400 ? `${text.slice(0, 400)}...` : text;
+}
+
+function extractChatMessageText(payload: ChatCompletionsResponse): string {
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part.text === "string" ? part.text : ""))
+      .join("")
+      .trim();
+  }
+
+  return "";
 }
 
 function formatError(error: unknown): string {
