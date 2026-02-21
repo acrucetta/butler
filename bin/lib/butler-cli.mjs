@@ -842,6 +842,12 @@ async function runButlerTui({ initialJobKind, chatId, requesterId, sessionKey, t
   if (!remoteReady) {
     printLine("Warning: ORCH_GATEWAY_TOKEN is missing/short; submit will fail until fixed.");
   }
+  const connectivity = await tuiCheckOrchestratorConnectivity(remoteContext.baseUrl);
+  if (!connectivity.ok) {
+    printLine(
+      `Warning: cannot reach orchestrator at ${remoteContext.baseUrl}. Run 'npm run up' or set ORCH_BASE_URL in .env.`
+    );
+  }
   printLine("");
 
   if (initialMessage) {
@@ -987,6 +993,30 @@ async function tuiAbortJob(remoteContext, jobId) {
   return response.job;
 }
 
+async function tuiCheckOrchestratorConnectivity(baseUrl) {
+  const normalized = String(baseUrl ?? "").replace(/\/+$/g, "");
+  if (!normalized) {
+    return { ok: false };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 3000);
+
+  try {
+    const response = await fetch(`${normalized}/health`, {
+      method: "GET",
+      signal: controller.signal
+    });
+    return { ok: response.ok || response.status === 404 || response.status === 401 };
+  } catch {
+    return { ok: false };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function tuiOrchestratorRequest(remoteContext, path, init) {
   const controller = new AbortController();
   const timeout = setTimeout(() => {
@@ -998,15 +1028,20 @@ async function tuiOrchestratorRequest(remoteContext, path, init) {
   }
 
   try {
-    const response = await fetch(`${baseUrl}${path}`, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": remoteContext.gatewayToken,
-        ...(init?.headers ?? {})
-      }
-    });
+    let response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": remoteContext.gatewayToken,
+          ...(init?.headers ?? {})
+        }
+      });
+    } catch (error) {
+      throw new Error(buildTuiConnectionErrorMessage(error, baseUrl));
+    }
 
     if (!response.ok) {
       const text = await response.text();
@@ -1019,6 +1054,14 @@ async function tuiOrchestratorRequest(remoteContext, path, init) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function buildTuiConnectionErrorMessage(error, baseUrl) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (String(message).toLowerCase().includes("fetch failed")) {
+    return `cannot reach orchestrator at ${baseUrl}; run 'npm run up' or set ORCH_BASE_URL in .env`;
+  }
+  return `cannot reach orchestrator at ${baseUrl}: ${message}`;
 }
 
 async function runSetupTelegram(cmdOptions, cliName) {
