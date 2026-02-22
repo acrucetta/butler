@@ -194,10 +194,24 @@ export class PiRpcSession {
       args.push("--append-system-prompt", promptFile);
     }
 
-    const binary =
-      process.platform === "win32" ? `${this.options.piBinary}.cmd` : this.options.piBinary;
+    let binary: string;
+    let finalArgs: string[];
 
-    const child = spawn(binary, args, {
+    if (process.platform === "win32") {
+      // Node.js v22+ rejects .cmd spawns with special chars (CVE-2024-27980).
+      // Bypass cmd.exe entirely by calling node with pi's JS entry point.
+      const piCliJs = resolve(
+        process.env.APPDATA ?? "",
+        "npm/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
+      );
+      binary = process.execPath;
+      finalArgs = [piCliJs, ...args];
+    } else {
+      binary = this.options.piBinary;
+      finalArgs = args;
+    }
+
+    const child = spawn(binary, finalArgs, {
       cwd: this.options.cwd,
       env: {
         ...process.env,
