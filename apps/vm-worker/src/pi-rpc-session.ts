@@ -198,7 +198,8 @@ export class PiRpcSession {
         ...process.env,
         ...(this.options.env ?? {})
       },
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: true
     });
 
     this.process = child;

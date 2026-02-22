@@ -2010,7 +2010,8 @@ function buildWorkerEnv(env) {
   const mcpBinDir = resolve(process.cwd(), process.env.BUTLER_MCP_BIN_DIR ?? DEFAULT_MCP_BIN_DIR);
   const next = { ...env };
   if (existsSync(mcpBinDir)) {
-    next.PATH = prependPathEntry(mcpBinDir, env.PATH);
+    const pathKey = Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+    next[pathKey] = prependPathEntry(mcpBinDir, env[pathKey]);
   }
   if (!next.PI_WORKSPACE || String(next.PI_WORKSPACE).trim().length === 0) {
     next.PI_WORKSPACE = repoRoot;
@@ -2302,7 +2303,8 @@ function spawnService(name, npmArgs, env) {
   const child = spawn("npm", npmArgs, {
     cwd: process.cwd(),
     env,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: true
   });
 
   pipeWithPrefix(name, child.stdout, process.stdout);
