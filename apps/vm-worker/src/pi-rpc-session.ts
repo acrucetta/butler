@@ -192,14 +192,16 @@ export class PiRpcSession {
       args.push("--append-system-prompt", this.options.appendSystemPrompt);
     }
 
-    const child = spawn(this.options.piBinary, args, {
+    const binary =
+      process.platform === "win32" ? `${this.options.piBinary}.cmd` : this.options.piBinary;
+
+    const child = spawn(binary, args, {
       cwd: this.options.cwd,
       env: {
         ...process.env,
         ...(this.options.env ?? {})
       },
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: true
+      stdio: ["pipe", "pipe", "pipe"]
     });
 
     this.process = child;
