@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as readline from "node:readline";
@@ -189,7 +189,9 @@ export class PiRpcSession {
       args.push("--model", this.options.model);
     }
     if (this.options.appendSystemPrompt) {
-      args.push("--append-system-prompt", this.options.appendSystemPrompt);
+      const promptFile = resolve(sessionDir, ".system-prompt-append.md");
+      writeFileSync(promptFile, this.options.appendSystemPrompt, "utf8");
+      args.push("--append-system-prompt", promptFile);
     }
 
     const binary =
