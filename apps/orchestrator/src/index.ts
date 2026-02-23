@@ -29,6 +29,7 @@ const proactiveConfigPath = resolve(
 const memoryRoot = resolve(process.env.ORCH_MEMORY_ROOT ?? process.cwd());
 const memoryLedgerPath = resolve(process.env.ORCH_MEMORY_LEDGER_FILE ?? ".data/orchestrator/memory-ledger.jsonl");
 const memoryIndexPath = resolve(process.env.ORCH_MEMORY_INDEX_FILE ?? ".data/orchestrator/memory-index.json");
+const ownerChatId = process.env.ORCH_OWNER_CHAT_ID ?? "";
 const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWAY_TOKEN);
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
 
@@ -517,12 +518,33 @@ function requireSecret(name: string, value: string | undefined): string {
 }
 
 function loadProactiveConfig(filePath: string): unknown {
-  if (!existsSync(filePath)) {
-    return {};
+  const config: Record<string, unknown> = existsSync(filePath)
+    ? JSON.parse(readFileSync(filePath, "utf8"))
+    : {};
+
+  if (ownerChatId) {
+    const heartbeats = Array.isArray(config.heartbeatRules) ? config.heartbeatRules : [];
+    const alreadyExists = heartbeats.some(
+      (r: unknown) => typeof r === "object" && r !== null && (r as Record<string, unknown>).id === "system:owner-checkin"
+    );
+    if (!alreadyExists) {
+      heartbeats.push({
+        id: "system:owner-checkin",
+        everySeconds: 1800,
+        prompt: "Check in: review recent activity, pending tasks, and anything that needs attention.",
+        delivery: { mode: "announce" },
+        target: {
+          kind: "task",
+          chatId: ownerChatId,
+          requesterId: ownerChatId,
+          sessionKey: `proactive:heartbeat:system:owner-checkin`
+        }
+      });
+      config.heartbeatRules = heartbeats;
+    }
   }
 
-  const raw = readFileSync(filePath, "utf8");
-  return JSON.parse(raw);
+  return config;
 }
 
 function persistProactiveConfig(filePath: string, config: unknown): void {
