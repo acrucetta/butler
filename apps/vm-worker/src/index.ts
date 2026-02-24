@@ -543,7 +543,19 @@ function buildSystemPromptContext(workspaceRoot: string, skillsContext: string):
     resolve(workspaceRoot, "memory", `${formatLocalDate(value)}.md`)
   );
 
-  const sections: string[] = [defaultMemoryPrompt()];
+  const runtimeLine = [
+    `host=${hostname()}`,
+    `os=${process.platform} (${process.arch})`,
+    piProvider ? `provider=${piProvider}` : "",
+    piModel ? `model=${piModel}` : "",
+    `channel=telegram`,
+    `date=${formatLocalDate(new Date())}`
+  ].filter(Boolean).join(" | ");
+
+  const sections: string[] = [
+    `## Runtime\nRuntime: ${runtimeLine}`,
+    defaultMemoryPrompt()
+  ];
   const soul = readTextIfExists(soulPath, 5_000);
   if (soul) {
     sections.push(`## SOUL.md\n${soul}`);
