@@ -92,7 +92,7 @@ export async function runButlerCli(options = {}) {
   program
     .command("doctor")
     .description("Run environment and runtime checks")
-    .option("--mode <mode>", "worker mode: mock|rpc", DEFAULT_EXEC_MODE)
+    .option("--mode <mode>", "worker mode: mock|rpc|embedded", DEFAULT_EXEC_MODE)
     .action((cmdOptions) => {
       const mode = parseMode(cmdOptions.mode);
       const issues = runDoctor({
@@ -118,7 +118,7 @@ export async function runButlerCli(options = {}) {
   program
     .command("up")
     .description("Run orchestrator + worker + gateway together")
-    .option("--mode <mode>", "worker mode: mock|rpc", DEFAULT_EXEC_MODE)
+    .option("--mode <mode>", "worker mode: mock|rpc|embedded", DEFAULT_EXEC_MODE)
     .option("--no-orchestrator", "do not start orchestrator")
     .option("--no-worker", "do not start worker")
     .option("--no-gateway", "do not start telegram gateway")
@@ -2324,7 +2324,7 @@ function resolveDefaultExecMode() {
   const explicit = String(process.env.PI_EXEC_MODE ?? "")
     .trim()
     .toLowerCase();
-  if (explicit === "mock" || explicit === "rpc") {
+  if (explicit === "mock" || explicit === "rpc" || explicit === "embedded") {
     return explicit;
   }
 
@@ -2336,10 +2336,10 @@ function resolveDefaultExecMode() {
 }
 
 function parseMode(raw) {
-  if (raw === "mock" || raw === "rpc") {
+  if (raw === "mock" || raw === "rpc" || raw === "embedded") {
     return raw;
   }
-  throw new Error(`Invalid mode '${raw}'. Expected 'mock' or 'rpc'.`);
+  throw new Error(`Invalid mode '${raw}'. Expected 'mock', 'rpc', or 'embedded'.`);
 }
 
 function parseTuiJobKind(raw) {
