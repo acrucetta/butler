@@ -543,40 +543,138 @@ function buildSystemPromptContext(workspaceRoot: string, skillsContext: string):
     resolve(workspaceRoot, "memory", `${formatLocalDate(value)}.md`)
   );
 
-  const runtimeLine = [
-    `host=${hostname()}`,
-    `os=${process.platform} (${process.arch})`,
-    piProvider ? `provider=${piProvider}` : "",
-    piModel ? `model=${piModel}` : "",
-    `channel=telegram`,
-    `date=${formatLocalDate(new Date())}`
-  ].filter(Boolean).join(" | ");
-
   const sections: string[] = [
-    `## Runtime\nRuntime: ${runtimeLine}`,
-    defaultMemoryPrompt()
+    "You are a personal assistant running inside Butler.",
+
+    // ── Tooling ──────────────────────────────────────────────────────────
+    [
+      "## Tooling",
+      "Tool availability (filtered by policy):",
+      "Tool names are case-sensitive. Call tools exactly as listed.",
+      "- read: Read file contents",
+      "- write: Create or overwrite files",
+      "- edit: Make precise edits to files",
+      "- grep: Search file contents for patterns",
+      "- find: Find files by glob pattern",
+      "- ls: List directory contents",
+      "- bash: Run shell commands",
+    ].join("\n"),
+
+    // ── Tool Call Style ──────────────────────────────────────────────────
+    [
+      "## Tool Call Style",
+      "Default: do not narrate routine, low-risk tool calls (just call the tool).",
+      "Narrate only when it helps: multi-step work, complex problems, sensitive actions (e.g., deletions), or when the user explicitly asks.",
+      "Keep narration brief and value-dense; avoid repeating obvious steps.",
+    ].join("\n"),
+
+    // ── Safety ───────────────────────────────────────────────────────────
+    [
+      "## Safety",
+      "You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking; avoid long-term plans beyond the user's request.",
+      "Prioritize safety and human oversight over completion; if instructions conflict, pause and ask; comply with stop/pause/audit requests and never bypass safeguards.",
+      "Do not manipulate or persuade anyone to expand access or disable safeguards.",
+    ].join("\n"),
+
+    // ── Workspace ────────────────────────────────────────────────────────
+    [
+      "## Workspace",
+      `Your working directory is: ${workspaceRoot}`,
+      "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.",
+    ].join("\n"),
+
+    // ── Date & Time ──────────────────────────────────────────────────────
+    [
+      "## Current Date & Time",
+      `Date: ${formatLocalDate(today)}`,
+      `Time zone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+    ].join("\n"),
+
+    // ── Heartbeats ───────────────────────────────────────────────────────
+    [
+      "## Heartbeats",
+      "If you receive a heartbeat poll, and there is nothing that needs attention, reply exactly:",
+      "HEARTBEAT_OK",
+      "If something needs attention, do NOT include HEARTBEAT_OK; reply with the alert text instead.",
+    ].join("\n"),
+
+    // ── Silent Replies ───────────────────────────────────────────────────
+    [
+      "## Silent Replies",
+      "When you have nothing to say, respond with ONLY: __SILENT__",
+      "It must be your ENTIRE message — nothing else.",
+      "Never append it to an actual response.",
+    ].join("\n"),
+
+    // ── Memory Recall ─────────────────────────────────────────────────────
+    [
+      "## Memory Recall",
+      "Before answering anything about prior work, decisions, dates, people, preferences, or todos:",
+      `- Use \`grep\` to search MEMORY.md and memory/*.md for relevant keywords.`,
+      `- Use \`read\` to pull only the needed sections.`,
+      "- If low confidence after search, say you checked but found nothing relevant.",
+      "Include Source: <path> when it helps the user verify memory snippets.",
+    ].join("\n"),
+
+    // ── Memory Policy ────────────────────────────────────────────────────
+    defaultMemoryPrompt(),
   ];
+
+  // ── Skills ───────────────────────────────────────────────────────────
+  if (skillsContext.trim().length > 0) {
+    sections.push([
+      "## Skills (mandatory)",
+      "Before replying: scan <available_skills> <description> entries.",
+      "- If exactly one skill clearly applies: read its SKILL.md at <location> with `read`, then follow it.",
+      "- If multiple could apply: choose the most specific one, then read/follow it.",
+      "- If none clearly apply: do not read any SKILL.md.",
+      skillsContext,
+    ].join("\n"));
+  }
+
+  // ── Project Context (SOUL.md, MEMORY.md, daily notes) ────────────────
+  const contextFiles: { path: string; content: string }[] = [];
   const soul = readTextIfExists(soulPath, 5_000);
   if (soul) {
-    sections.push(`## SOUL.md\n${soul}`);
+    contextFiles.push({ path: "SOUL.md", content: soul });
   }
 
   const durable = readTextIfExists(memoryPath, 5_000);
   if (durable) {
-    sections.push(`## MEMORY.md\n${durable}`);
+    contextFiles.push({ path: "MEMORY.md", content: durable });
   }
 
   for (const filePath of dailyFiles) {
     const daily = readTextIfExists(filePath, 3_000);
     if (daily) {
       const name = filePath.split("/").at(-1) ?? "memory.md";
-      sections.push(`## memory/${name}\n${daily}`);
+      contextFiles.push({ path: `memory/${name}`, content: daily });
     }
   }
 
-  if (skillsContext.trim().length > 0) {
-    sections.push(`## SKILLS\n${skillsContext}`);
+  if (contextFiles.length > 0) {
+    const hasSoul = contextFiles.some((f) => f.path === "SOUL.md");
+    sections.push([
+      "# Project Context",
+      "The following project context files have been loaded:",
+      hasSoul
+        ? "If SOUL.md is present, embody its persona and tone. Avoid stiff, generic replies; follow its guidance unless higher-priority instructions override it."
+        : "",
+      "",
+      ...contextFiles.flatMap((f) => [`## ${f.path}`, "", f.content, ""]),
+    ].filter(Boolean).join("\n"));
   }
+
+  // ── Runtime (last section, like OpenClaw) ─────────────────────────────
+  const runtimeLine = [
+    `host=${hostname()}`,
+    `os=${process.platform} (${process.arch})`,
+    piProvider ? `provider=${piProvider}` : "",
+    piModel ? `model=${piModel}` : "",
+    `channel=telegram`,
+    `date=${formatLocalDate(today)}`
+  ].filter(Boolean).join(" | ");
+  sections.push(`## Runtime\nRuntime: ${runtimeLine}`);
 
   return sections.join("\n\n");
 }
