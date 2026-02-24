@@ -286,12 +286,26 @@ function formatSkillsContext(skills: SkillManifest[], maxChars: number): string 
   ];
 
   for (const skill of skills) {
-    const body = [
+    const parts = [
       `### ${skill.name} (${skill.id})`,
       skill.description.length > 0 ? skill.description : "",
       skill.tags.length > 0 ? `tags: ${skill.tags.join(", ")}` : "",
       skill.instructions
-    ]
+    ];
+
+    // Auto-inject CLI tool usage for MCP-backed skills.
+    // Skills with targets have generated CLI wrappers in PATH (e.g., `ynab`, `readwise`).
+    if (skill.tools.targets.length > 0) {
+      const cliNames = skill.tools.targets.map((target) => `\`${target.name}\``).join(", ");
+      parts.push(
+        "",
+        `**CLI tools in PATH**: ${cliNames}`,
+        `Run \`<tool> --help\` to discover available subcommands and flags.`,
+        `Example: \`${skill.tools.targets[0].name} --help\``
+      );
+    }
+
+    const body = parts
       .filter((line) => line.length > 0)
       .join("\n");
 

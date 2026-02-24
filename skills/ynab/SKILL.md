@@ -3,19 +3,26 @@
 ## Purpose
 Use this skill to check budget status, review account balances, query transactions, and manage category allocations in YNAB.
 
-## Capabilities
-- **Budgets**: List budgets, get budget summaries and month details.
-- **Accounts**: List accounts and balances.
-- **Categories**: View category groups, balances, and goals.
-- **Transactions**: List, create, update, and delete transactions.
-- **Payees**: Look up payees.
-- **Scheduled Transactions**: View and manage recurring transactions.
-- **Undo**: List recent write operations and reverse them if needed.
+## Usage
+Run `ynab --help` to see all available commands. Common examples:
+
+```bash
+# List all budgets
+ynab list-budgets
+
+# Get budget summary for current month
+ynab budget-summary
+
+# Get unapproved transactions
+ynab get-unapproved-transactions
+
+# Create a transaction
+ynab create-transaction --account-id <id> --date 2026-02-24 --amount 10.99 --payee-name "Store"
+```
 
 ## Constraints
-- Monetary amounts are in **milliunits** (divide by 1000 for display: 294230 → $294.23).
 - Always confirm before creating or deleting transactions.
-- Use `last-used` as the budget ID unless the user specifies a different budget.
+- Monetary amounts returned are in **milliunits** (divide by 1000 for display: 294230 → $294.23).
 - Respect the 200 requests/hour rate limit — prefer batch queries when possible.
 
 ## Setup
