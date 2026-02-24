@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Job, JobKind } from "@pi-self/contracts";
 import { PiEmbeddedSessionPool } from "./pi-embedded-session.js";
-import { PiRpcSessionPool } from "./pi-rpc-session.js";
 import type { PiSession, PiSessionPool } from "./pi-session.js";
 
 const DEFAULT_RETRYABLE_ERROR_PATTERNS = [
@@ -75,11 +74,10 @@ export interface FallbackEvaluationInput {
   errorMessage: string;
 }
 
-export type ExecutionMode = "mock" | "rpc" | "embedded";
+export type ExecutionMode = "mock" | "embedded";
 
 interface RuntimeOptions {
   executionMode: ExecutionMode;
-  piBinary: string;
   cwd: string;
   sessionRoot: string;
   appendSystemPrompt: string;
@@ -191,19 +189,7 @@ export class ModelRoutingRuntime {
   }
 
   private createPool(profile: ResolvedModelProfile): PiSessionPool {
-    if (this.options.executionMode === "embedded") {
-      return new PiEmbeddedSessionPool({
-        cwd: this.options.cwd,
-        sessionRoot: this.options.sessionRoot,
-        provider: profile.provider,
-        model: profile.model,
-        appendSystemPrompt: profile.appendSystemPrompt,
-        env: profile.env
-      });
-    }
-
-    return new PiRpcSessionPool({
-      piBinary: this.options.piBinary,
+    return new PiEmbeddedSessionPool({
       cwd: this.options.cwd,
       sessionRoot: this.options.sessionRoot,
       provider: profile.provider,

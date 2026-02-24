@@ -92,7 +92,7 @@ export async function runButlerCli(options = {}) {
   program
     .command("doctor")
     .description("Run environment and runtime checks")
-    .option("--mode <mode>", "worker mode: mock|rpc|embedded", DEFAULT_EXEC_MODE)
+    .option("--mode <mode>", "worker mode: mock|embedded", DEFAULT_EXEC_MODE)
     .action((cmdOptions) => {
       const mode = parseMode(cmdOptions.mode);
       const issues = runDoctor({
@@ -118,7 +118,7 @@ export async function runButlerCli(options = {}) {
   program
     .command("up")
     .description("Run orchestrator + worker + gateway together")
-    .option("--mode <mode>", "worker mode: mock|rpc|embedded", DEFAULT_EXEC_MODE)
+    .option("--mode <mode>", "worker mode: mock|embedded", DEFAULT_EXEC_MODE)
     .option("--no-orchestrator", "do not start orchestrator")
     .option("--no-worker", "do not start worker")
     .option("--no-gateway", "do not start telegram gateway")
@@ -1363,7 +1363,7 @@ async function runSetupTelegram(cmdOptions, cliName) {
   console.log("");
   console.log(`Next steps:`);
   console.log(`- npm run ${cliName} -- up --mode mock`);
-  console.log(`- npm run ${cliName} -- up --mode rpc`);
+  console.log(`- npm run ${cliName} -- up --mode embedded`);
   if (interactive && prompter) {
     await prompter.outro("Butler setup complete.");
   }
@@ -2324,22 +2324,19 @@ function resolveDefaultExecMode() {
   const explicit = String(process.env.PI_EXEC_MODE ?? "")
     .trim()
     .toLowerCase();
-  if (explicit === "mock" || explicit === "rpc" || explicit === "embedded") {
+  if (explicit === "mock" || explicit === "embedded") {
     return explicit;
   }
 
-  const binary = process.env.PI_BINARY ?? "pi";
-  const check = spawnSync("bash", ["-lc", `command -v ${shellEscape(binary)} >/dev/null 2>&1`], {
-    cwd: process.cwd()
-  });
-  return check.status === 0 ? "rpc" : "mock";
+  // Default to embedded — the Pi SDK runs in-process.
+  return "embedded";
 }
 
 function parseMode(raw) {
-  if (raw === "mock" || raw === "rpc" || raw === "embedded") {
+  if (raw === "mock" || raw === "embedded") {
     return raw;
   }
-  throw new Error(`Invalid mode '${raw}'. Expected 'mock', 'rpc', or 'embedded'.`);
+  throw new Error(`Invalid mode '${raw}'. Expected 'mock' or 'embedded'.`);
 }
 
 function parseTuiJobKind(raw) {
@@ -2375,16 +2372,6 @@ function runDoctor(input) {
     requireValue("TG_OWNER_IDS", process.env.TG_OWNER_IDS, issues);
     if (parseBooleanLike(coalesce(process.env.TG_MEDIA_ENABLED, "true"))) {
       requireValue("OPENAI_API_KEY", process.env.OPENAI_API_KEY, issues);
-    }
-  }
-
-  if (input.includeWorker && input.mode === "rpc") {
-    const binary = process.env.PI_BINARY ?? "pi";
-    const check = spawnSync("bash", ["-lc", `command -v ${shellEscape(binary)} >/dev/null 2>&1`], {
-      cwd: process.cwd()
-    });
-    if (check.status !== 0) {
-      issues.push(`PI_EXEC_MODE=rpc requires PI_BINARY to be installed (missing '${binary}')`);
     }
   }
 

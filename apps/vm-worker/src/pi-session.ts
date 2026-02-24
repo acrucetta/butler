@@ -1,9 +1,8 @@
 /**
- * Shared interface for Pi execution backends (RPC subprocess and embedded SDK).
+ * Shared interface for Pi session execution.
  *
- * Both PiRpcSession and PiEmbeddedSession implement PiSession so that the
- * model-routing layer and job loop are completely agnostic of the execution
- * mode.
+ * PiEmbeddedSession implements PiSession so that the model-routing layer
+ * and job loop are agnostic of internal session mechanics.
  */
 
 export interface PiPromptCallbacks {

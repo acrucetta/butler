@@ -6,7 +6,7 @@ Personal control plane for running a Pi agent through Telegram with VM-isolated 
 
 - `apps/telegram-gateway`: Telegram bot, pairing, authorization, command UX
 - `apps/orchestrator`: queue, approvals, job state, pause/resume control
-- `apps/vm-worker`: worker that executes jobs in `mock` or Pi RPC mode
+- `apps/vm-worker`: worker that executes jobs in `mock` or Pi embedded SDK mode
 - `packages/contracts`: shared schemas and types
 - `bin/butler.mjs`: primary CLI (`setup`, `doctor`, `up`)
 - `bin/pi-self.mjs`: legacy CLI alias (compatible with existing commands)
@@ -20,7 +20,7 @@ Telegram
   -> telegram-gateway
   -> orchestrator (queue + policy state)
   -> vm-worker (in sandbox VM)
-  -> pi --mode rpc (in VM)
+  -> Pi SDK (embedded in worker)
 ```
 
 Detailed, living architecture doc (with Mermaid): `docs/ARCHITECTURE.md`
@@ -144,8 +144,7 @@ TG_ONLY_AGENT_OUTPUT=true
 # optional: render final agent text as Telegram MarkdownV2 (default true)
 TG_AGENT_MARKDOWNV2=true
 # optional: explicit Pi runtime controls
-PI_EXEC_MODE=rpc
-PI_BINARY=pi
+PI_EXEC_MODE=embedded
 PI_PROVIDER=openrouter
 PI_MODEL=moonshotai/kimi-k2.5
 # optional: OpenClaw-style model profile routing + fallback
@@ -187,7 +186,7 @@ Butler auto-picks execution mode:
 
 ```bash
 # optional override
-npm run butler -- up --mode rpc
+npm run butler -- up --mode embedded
 npm run butler -- up --mode mock
 ```
 

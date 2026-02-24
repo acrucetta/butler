@@ -24,7 +24,7 @@ flowchart LR
     subgraph Execution_Plane
       ROUTER[model router: profiles/routes/cooldowns]
       ROUTER --> WORKER[vm-worker]
-      WORKER[vm-worker] -->|RPC prompt/abort| PI[pi runtime]
+      WORKER[vm-worker] -->|embedded SDK| PI[pi runtime]
     end
 
     WORKER -->|claim/heartbeat/events/complete/fail| ORCH
@@ -62,14 +62,14 @@ flowchart TB
 - Media updates (voice/audio/photo) are converted into text context in gateway before creating jobs.
 - `orchestrator` is the source of truth for job state, queueing, event history, and global pause state.
 - `orchestrator` also hosts proactive trigger runtime (heartbeats, cron rules, webhook ingress) and enqueues regular jobs.
-- `vm-worker` claims jobs and executes them in `mock` or `rpc` mode.
+- `vm-worker` claims jobs and executes them in `mock` or `embedded` mode.
 - `vm-worker` includes model routing that selects a profile chain (by job kind/metadata) and performs guarded fallback.
-- `vm-worker` enforces worker-local tool policy rules (allow/deny) during RPC tool invocation.
+- `vm-worker` enforces worker-local tool policy rules (allow/deny) during tool invocation.
 - `vm-worker` selects enabled local skills from `skills/*` and injects skill guidance into job prompt context.
-- `pi` runtime is only invoked by `vm-worker`.
+- `pi` SDK runs embedded in `vm-worker` (no subprocess).
 - `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
 - `butler tui` can submit and monitor test jobs directly against orchestrator using gateway-token auth.
-- In RPC mode, worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
+- Worker defaults PI workspace to repo root so personality/memory markdown files are shared context.
 - `packages/contracts` defines request/response schemas shared by gateway, orchestrator, and worker.
 
 ## Capabilities unlocked by proactive runtime
@@ -152,7 +152,7 @@ The code follows the same boundaries shown above:
 - Orchestrator API routes and auth separation (gateway token vs worker token): `apps/orchestrator/src/index.ts`
 - Orchestrator job queue/state machine and JSON persistence: `apps/orchestrator/src/store.ts`
 - Worker claim loop, heartbeat, and completion/failure flow: `apps/vm-worker/src/index.ts`
-- Worker Pi RPC session lifecycle: `apps/vm-worker/src/pi-rpc-session.ts`
+- Worker Pi embedded session lifecycle: `apps/vm-worker/src/pi-embedded-session.ts`
 - Worker model routing and fallback runtime: `apps/vm-worker/src/model-routing.ts`
 - Worker tool policy runtime: `apps/vm-worker/src/tool-policy.ts`
 - Shared schemas/contracts at API boundaries: `packages/contracts/src/index.ts`

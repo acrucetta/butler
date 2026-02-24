@@ -1,11 +1,10 @@
 /**
  * Embedded Pi session — wraps the Pi SDK's `AgentSession` directly in-process.
  *
- * Unlike PiRpcSession (which spawns `pi --mode rpc` as a child process), this
- * runs the agent loop inside the same Node.js process.  Advantages:
+ * Runs the agent loop inside the same Node.js process, providing:
  * - Full control over conversation history, compaction, and tool interception
  * - No IPC overhead or subprocess lifecycle management
- * - Direct access to session events without JSON-over-stdio parsing
+ * - Direct access to session events via the SDK's subscribe API
  */
 
 import { mkdirSync } from "node:fs";
@@ -159,8 +158,7 @@ export class PiEmbeddedSession implements PiSession {
   private async startInternal(): Promise<void> {
     mkdirSync(this.options.sessionDir, { recursive: true });
 
-    // Inject profile env vars into process.env so the SDK picks them up
-    // (same approach as RPC mode which passes them via spawn env).
+    // Inject profile env vars into process.env so the SDK picks them up.
     if (this.options.env) {
       for (const [key, value] of Object.entries(this.options.env)) {
         process.env[key] = value;
@@ -172,8 +170,8 @@ export class PiEmbeddedSession implements PiSession {
       this.options.sessionDir
     );
 
-    // Use DefaultResourceLoader to inject appendSystemPrompt — this is the
-    // embedded equivalent of RPC's `--append-system-prompt` CLI flag.
+    // Use DefaultResourceLoader to inject appendSystemPrompt into the
+    // system prompt (personality/memory context from SOUL.md, MEMORY.md).
     const resourceLoader = new DefaultResourceLoader({
       cwd: this.options.cwd,
       ...(this.options.appendSystemPrompt
