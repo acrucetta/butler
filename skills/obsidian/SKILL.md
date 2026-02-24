@@ -4,10 +4,10 @@
 Use this skill to create, read, search, and organize markdown notes in the Obsidian vault.
 
 ## Capabilities
-- **Read/Write**: read-note, create-note, edit-note, delete-note, move-note
-- **Search**: search-vault for keyword search across all notes
-- **Organization**: add-tags, remove-tags, rename-tag, manage-tags
-- **Structure**: create-directory, list-available-vaults
+- **Read/Write**: read_note, write_note, delete_note, move_note, read_multiple_notes
+- **Search**: search_notes for keyword search across all notes
+- **Metadata**: get_frontmatter, update_frontmatter, get_notes_info
+- **Organization**: manage_tags, list_directory
 
 ## Constraints
 - Always confirm before deleting notes.
