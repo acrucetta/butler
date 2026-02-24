@@ -5,7 +5,8 @@ import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
 import { ModelRoutingRuntime, type ExecutionMode } from "./model-routing.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
 import type { PiSession } from "./pi-session.js";
-import { parseSkillsMode, resolveSkillsContext } from "./skills-runtime.js";
+import { McpSkillToolsRuntime } from "./mcp-skill-tools.js";
+import { discoverSkills, loadSkillsConfig, parseSkillsMode, resolveSkillsContext } from "./skills-runtime.js";
 import { ToolPolicyRuntime } from "./tool-policy.js";
 
 const orchestratorBaseUrl = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8787";
@@ -58,6 +59,7 @@ const toolPolicy = new ToolPolicyRuntime({
 
 /** Active sessions by sessionKey — enables steer() for messages arriving mid-run. */
 const activeRuns = new Map<string, PiSession>();
+const mcpSkillTools = new McpSkillToolsRuntime();
 
 let shuttingDown = false;
 
@@ -80,6 +82,23 @@ async function run(): Promise<void> {
     console.log(
       `[worker] skills config=${skillsConfigFile} mode=${skillsModeOverride ?? "config"} contextWindow=${skillsContextWindowOverride ?? "config"}`
     );
+
+    // Start MCP servers for enabled skills and register their tools natively.
+    const skillsConfig = loadSkillsConfig(skillsConfigFile);
+    const discovered = discoverSkills(piCwd, skillsDir);
+    const enabledIds = new Set(skillsConfig.enabledSkills);
+    const mcpSkills = discovered.filter(
+      (s) => enabledIds.has(s.id) && Object.keys(s.tools.mcpServers).length > 0
+    );
+    if (mcpSkills.length > 0) {
+      const mcpTools = await mcpSkillTools.start(mcpSkills, (msg) => console.log(msg));
+      if (mcpTools.length > 0) {
+        modelRouting.setCustomTools(mcpTools as any);
+        console.log(
+          `[worker] MCP skill tools registered: ${mcpTools.map((t) => t.name).join(", ")}`
+        );
+      }
+    }
   }
 
   while (!shuttingDown) {
@@ -97,6 +116,7 @@ async function run(): Promise<void> {
     }
   }
 
+  await mcpSkillTools.shutdown();
   await modelRouting.shutdown();
   console.log("[worker] shutdown complete");
 }

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.52.8",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@pi-self/contracts": "file:../../packages/contracts"
   }
 }

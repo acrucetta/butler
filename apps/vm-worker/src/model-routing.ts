@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Job, JobKind } from "@pi-self/contracts";
+import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { PiEmbeddedSessionPool } from "./pi-embedded-session.js";
 import type { PiSession, PiSessionPool } from "./pi-session.js";
 
@@ -87,6 +88,7 @@ interface RuntimeOptions {
   configFilePath?: string;
   requireConfigFile?: boolean;
   logger?: Pick<Console, "log" | "warn">;
+  customTools?: ToolDefinition[];
 }
 
 export class ModelRoutingRuntime {
@@ -99,7 +101,7 @@ export class ModelRoutingRuntime {
   private readonly sourceLabel: string;
   private readonly logger: Pick<Console, "log" | "warn">;
 
-  constructor(private readonly options: RuntimeOptions) {
+  constructor(private options: RuntimeOptions) {
     this.logger = options.logger ?? console;
 
     const loaded = loadRoutingConfig({
@@ -157,6 +159,11 @@ export class ModelRoutingRuntime {
     return this.sourceLabel;
   }
 
+  /** Set custom tools (e.g. MCP skill tools) before any sessions are created. */
+  setCustomTools(tools: ToolDefinition[]): void {
+    this.options.customTools = tools;
+  }
+
   buildPlan(job: Job): ModelAttemptPlan {
     const requestedProfileId = typeof job.metadata?.modelProfile === "string" ? job.metadata.modelProfile : undefined;
     if (requestedProfileId && !this.profilesById.has(requestedProfileId)) {
@@ -197,7 +204,8 @@ export class ModelRoutingRuntime {
       model: profile.model,
       appendSystemPrompt: profile.appendSystemPrompt,
       env: profile.env,
-      historyLimit: this.options.historyLimit
+      historyLimit: this.options.historyLimit,
+      customTools: this.options.customTools
     });
   }
 

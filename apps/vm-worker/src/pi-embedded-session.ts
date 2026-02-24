@@ -19,7 +19,8 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
-  codingTools
+  codingTools,
+  type ToolDefinition
 } from "@mariozechner/pi-coding-agent";
 import { limitHistoryTurns } from "./history.js";
 import type { PiPromptCallbacks, PiSession, PiSessionPool } from "./pi-session.js";
@@ -39,6 +40,8 @@ export interface PiEmbeddedSessionOptions {
   authStorage?: AuthStorage;
   /** Override for testing — inject a pre-built ModelRegistry. */
   modelRegistry?: ModelRegistry;
+  /** Custom tools (e.g. MCP skill tools) registered alongside built-in codingTools. */
+  customTools?: ToolDefinition[];
 }
 
 export class PiEmbeddedSession implements PiSession {
@@ -285,7 +288,10 @@ export class PiEmbeddedSession implements PiSession {
       cwd: this.options.cwd,
       sessionManager,
       resourceLoader,
-      tools: codingTools
+      tools: codingTools,
+      ...(this.options.customTools && this.options.customTools.length > 0
+        ? { customTools: this.options.customTools }
+        : {})
     };
 
     // If provider+model specified, resolve via ModelRegistry
@@ -325,6 +331,7 @@ export interface PiEmbeddedSessionPoolOptions {
   historyLimit?: number;
   authStorage?: AuthStorage;
   modelRegistry?: ModelRegistry;
+  customTools?: ToolDefinition[];
 }
 
 export class PiEmbeddedSessionPool implements PiSessionPool {
@@ -347,7 +354,8 @@ export class PiEmbeddedSessionPool implements PiSessionPool {
       env: this.options.env,
       historyLimit: this.options.historyLimit,
       authStorage: this.options.authStorage,
-      modelRegistry: this.options.modelRegistry
+      modelRegistry: this.options.modelRegistry,
+      customTools: this.options.customTools
     });
 
     this.sessions.set(sessionKey, created);
