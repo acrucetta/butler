@@ -18,6 +18,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import {
   createAgentSession,
+  DefaultResourceLoader,
   SessionManager,
   codingTools
 } from "@mariozechner/pi-coding-agent";
@@ -171,9 +172,19 @@ export class PiEmbeddedSession implements PiSession {
       this.options.sessionDir
     );
 
+    // Use DefaultResourceLoader to inject appendSystemPrompt — this is the
+    // embedded equivalent of RPC's `--append-system-prompt` CLI flag.
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: this.options.cwd,
+      ...(this.options.appendSystemPrompt
+        ? { appendSystemPrompt: this.options.appendSystemPrompt }
+        : {})
+    });
+
     const sessionOptions: Parameters<typeof createAgentSession>[0] = {
       cwd: this.options.cwd,
       sessionManager,
+      resourceLoader,
       tools: codingTools
     };
 
