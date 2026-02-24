@@ -193,7 +193,10 @@ async function runJob(job: Job): Promise<void> {
         `Skills selected (${skillsContext.mode}): ${skillsContext.selected.map((skill) => skill.id).join(", ")}`
       );
     }
-    const preparedPrompt = buildPromptWithWorkspaceContext(job.prompt, piCwd, skillsContext.context);
+    // Workspace context (SOUL.md, MEMORY.md, skills) is now injected into
+    // the system prompt via buildSystemPromptContext(). The user prompt is
+    // passed through as-is to avoid duplicate context.
+    const preparedPrompt = job.prompt;
     const plan = modelRouting.buildPlan(job);
     await postEvent(
       job.id,
@@ -238,11 +241,20 @@ async function runJob(job: Job): Promise<void> {
         session.setSystemPrompt(systemPrompt);
       }
 
-      try {
-        let policyViolationMessage: string | null = null;
-        let policyAbortSent = false;
-        const blockedTools = new Set<string>();
+      // Proactively disable denied tools via setActiveToolsByName() so the
+      // model never attempts them. This replaces the old abort-on-violation
+      // approach — the agent naturally uses alternative tools instead.
+      const allTools = session.getAllToolNames();
+      if (allTools.length > 0) {
+        const allowedTools = allTools.filter((name) => policyContext.evaluateTool(name).allowed);
+        if (allowedTools.length < allTools.length) {
+          session.setActiveTools(allowedTools);
+          const disabledCount = allTools.length - allowedTools.length;
+          await postEvent(job.id, "log", `Tool policy disabled ${disabledCount} tool(s) before prompt`);
+        }
+      }
 
+      try {
         const result = await session.prompt(preparedPrompt, {
           onTextDelta(delta) {
             attemptHadOutput = true;
@@ -251,36 +263,16 @@ async function runJob(job: Job): Promise<void> {
           },
           onToolStart(toolName) {
             attemptHadToolActivity = true;
-
-            const decision = policyContext.evaluateTool(toolName);
-            if (!decision.allowed) {
-              blockedTools.add(toolName);
-              policyViolationMessage = `Tool policy denied '${toolName}' (reason=${decision.reason}${decision.matchedDenyPattern ? ` pattern=${decision.matchedDenyPattern}` : ""})`;
-              void postEvent(job.id, "log", policyViolationMessage);
-              if (!policyAbortSent && activeSession) {
-                policyAbortSent = true;
-                void activeSession.abort();
-              }
-              return;
-            }
-
             void postEvent(job.id, "tool_start", `Tool started: ${toolName}`, { toolName });
           },
           onToolEnd(toolName) {
             attemptHadToolActivity = true;
-            if (blockedTools.has(toolName)) {
-              return;
-            }
             void postEvent(job.id, "tool_end", `Tool finished: ${toolName}`, { toolName });
           },
           onLog(message) {
             void postEvent(job.id, "log", message);
           }
         });
-
-        if (policyViolationMessage) {
-          throw new Error(policyViolationMessage);
-        }
 
         modelRouting.markSuccess(profile.id);
         await flushDelta();
@@ -321,8 +313,11 @@ async function runJob(job: Job): Promise<void> {
       return;
     }
 
-    await orchestrator.complete(job.id, finalResult);
-    console.log(`[worker] job complete job=${job.id}`);
+    // If the agent responded with __SILENT__, complete the job without
+    // forwarding any text to the user (prevents literal "__SILENT__" in Telegram).
+    const isSilent = finalResult.trim() === "__SILENT__";
+    await orchestrator.complete(job.id, isSilent ? "" : finalResult);
+    console.log(`[worker] job complete job=${job.id}${isSilent ? " (silent)" : ""}`);
   } catch (error) {
     if (abortRequested) {
       await orchestrator.aborted(job.id, "Abort requested by user");
@@ -485,52 +480,6 @@ function defaultMemoryPrompt(): string {
     "- Do not use single-asterisk italics (*like this*) for Telegram; use underscores (_like this_) for italics.",
     "- Telegram MarkdownV2 does not support native tables or horizontal rules; prefer compact lists, or render tables as fenced code blocks."
   ].join("\n");
-}
-
-function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: string, skillsContext: string): string {
-  const soulPath = resolve(workspaceRoot, "SOUL.md");
-  const memoryPath = resolve(workspaceRoot, "MEMORY.md");
-  const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-  const dailyFiles = [today, yesterday].map((value) =>
-    resolve(workspaceRoot, "memory", `${formatLocalDate(value)}.md`)
-  );
-
-  const sections: string[] = [];
-  const soul = readTextIfExists(soulPath, 5_000);
-  if (soul) {
-    sections.push(`## SOUL.md\n${soul}`);
-  }
-
-  const durable = readTextIfExists(memoryPath, 5_000);
-  if (durable) {
-    sections.push(`## MEMORY.md\n${durable}`);
-  }
-
-  for (const filePath of dailyFiles) {
-    const daily = readTextIfExists(filePath, 3_000);
-    if (daily) {
-      const name = filePath.split("/").at(-1) ?? "memory.md";
-      sections.push(`## memory/${name}\n${daily}`);
-    }
-  }
-
-  if (skillsContext.trim().length > 0) {
-    sections.push(`## SKILLS\n${skillsContext}`);
-  }
-
-  if (sections.length === 0) {
-    return userPrompt;
-  }
-
-  return [
-    "Workspace context snapshot (OpenClaw-style personality and memory).",
-    "Treat this as active context. Do not repeat it verbatim to the user.",
-    sections.join("\n\n"),
-    "## User request",
-    userPrompt
-  ].join("\n\n");
 }
 
 function buildSystemPromptContext(workspaceRoot: string, skillsContext: string): string {

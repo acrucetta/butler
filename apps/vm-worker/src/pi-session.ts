@@ -20,6 +20,10 @@ export interface PiSession {
   isStreaming(): boolean;
   /** Update the system prompt for subsequent runs (refreshes personality/memory). */
   setSystemPrompt(prompt: string): void;
+  /** Set which tools are active by name. Denied tools are removed before prompting. */
+  setActiveTools(toolNames: string[]): void;
+  /** Get all available tool names. */
+  getAllToolNames(): string[];
   abort(): Promise<void>;
   stop(): Promise<void>;
 }

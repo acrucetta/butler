@@ -189,6 +189,17 @@ export class PiEmbeddedSession implements PiSession {
     this.currentSystemPrompt = prompt;
   }
 
+  setActiveTools(toolNames: string[]): void {
+    if (this.session) {
+      this.session.setActiveToolsByName(toolNames);
+    }
+  }
+
+  getAllToolNames(): string[] {
+    if (!this.session) return [];
+    return this.session.getActiveToolNames();
+  }
+
   async steer(text: string): Promise<void> {
     if (this.session && this.session.isStreaming) {
       await this.session.steer(text);

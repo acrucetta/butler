@@ -956,7 +956,14 @@ async function trackJob(chatId: string, threadId: string | undefined, jobId: str
 
 async function sendTerminalJobMessage(chatId: string, threadId: string | undefined, job: Job): Promise<void> {
   if (job.status === "completed") {
-    const result = job.resultText?.trim() || "(No output)";
+    const result = job.resultText?.trim() || "";
+
+    // Silent reply — agent explicitly chose not to respond. Skip Telegram message entirely.
+    if (!result || result === "__SILENT__") {
+      console.log(`[gateway] silent reply for job=${job.id}, skipping Telegram message`);
+      return;
+    }
+
     const chunks = splitMessage(result, agentMarkdownV2 ? 2800 : 3500);
 
     if (!onlyAgentOutput) {
