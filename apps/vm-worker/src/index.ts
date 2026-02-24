@@ -25,7 +25,9 @@ const modelRoutingConfigRequired = Boolean(process.env.PI_MODEL_ROUTING_FILE);
 const toolPolicyConfigFile = resolve(process.env.PI_TOOL_POLICY_FILE ?? ".data/worker/tool-policy.json");
 const toolPolicyConfigRequired = Boolean(process.env.PI_TOOL_POLICY_FILE);
 const mcpCliBinDir = resolve(process.env.BUTLER_MCP_BIN_DIR ?? ".data/mcp/bin");
-const skillsConfigFile = resolve(process.env.PI_SKILLS_CONFIG_FILE ?? ".data/skills/config.json");
+// Resolve relative to piCwd (project root) since butler CLI writes config there,
+// not relative to process.cwd() which may be apps/vm-worker/ in workspace mode.
+const skillsConfigFile = resolve(piCwd, process.env.PI_SKILLS_CONFIG_FILE ?? ".data/skills/config.json");
 const skillsModeOverride = parseSkillsMode(process.env.PI_SKILLS_MODE);
 const skillsContextWindowOverride = parsePositiveInt(process.env.PI_SKILLS_CONTEXT_WINDOW);
 const skillsMaxCharsOverride = parsePositiveInt(process.env.PI_SKILLS_MAX_CHARS);
