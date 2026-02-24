@@ -1,0 +1,29 @@
+{
+  "id": "ynab",
+  "name": "YNAB",
+  "description": "Budget tracking, account balances, transactions, and category management via YNAB (You Need A Budget).",
+  "tags": ["ynab", "budget", "finance", "money", "transactions", "spending", "savings", "accounts", "categories"],
+  "env": [
+    "YNAB_API_TOKEN"
+  ],
+  "tools": {
+    "mcpServers": {
+      "ynab": {
+        "description": "YNAB MCP server for budget and transaction management",
+        "command": "npx",
+        "args": [
+          "-y",
+          "ynab-mcp-server"
+        ]
+      }
+    },
+    "targets": [
+      {
+        "name": "ynab",
+        "selector": "ynab",
+        "emitTypes": true,
+        "timeoutMs": 120000
+      }
+    ]
+  }
+}
