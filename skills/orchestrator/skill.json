@@ -1,0 +1,7 @@
+{
+  "id": "orchestrator",
+  "name": "Orchestrator",
+  "description": "Manage proactive cron jobs, heartbeat rules, and scheduled routines.",
+  "tags": ["cron", "schedule", "heartbeat", "proactive", "routine", "reminder", "recurring"],
+  "env": []
+}
