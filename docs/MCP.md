@@ -13,7 +13,7 @@ The repo needs a first-class path to consume MCP servers and expose them as loca
 
 ## Non-goals
 
-- Native long-lived MCP runtime inside `vm-worker`.
+- ~~Native long-lived MCP runtime inside `vm-worker`.~~ (Implemented: MCP servers now start at worker boot and tools register natively.)
 - Policy engine for MCP tool allow/deny.
 - Automated remote install of MCP servers.
 
@@ -76,6 +76,22 @@ Setup wizard shortcut:
 ```bash
 npm run butler -- setup --skills readwise,gmail --skill-env ACCESS_TOKEN=<token>
 ```
+
+## YNAB setup (via skills + MCP)
+
+1. Set `YNAB_API_TOKEN` in `.env` (generate a Personal Access Token from YNAB Account Settings > Developer Settings).
+2. Enable:
+
+```bash
+npm run butler -- skills enable ynab
+```
+
+3. Restart Butler. The YNAB MCP server starts at boot and registers 5 native tools:
+   - `mcp__ynab__list_budgets`
+   - `mcp__ynab__budget_summary`
+   - `mcp__ynab__create_transaction`
+   - `mcp__ynab__get_unapproved_transactions`
+   - `mcp__ynab__approve_transaction`
 
 ## Google Calendar + Gmail setup (OpenClaw `gog` CLI)
 

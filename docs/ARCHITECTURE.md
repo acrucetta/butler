@@ -28,6 +28,7 @@ flowchart LR
     end
 
     WORKER -->|claim/heartbeat/events/complete/fail| ORCH
+    WORKER -->|native tool registration| MCPSERVERS[MCP skill servers]
     WORKER -->|PATH includes generated wrappers| MCPBIN[.data/mcp/bin]
     WORKER --> PMEM[(SOUL.md + MEMORY.md + memory/YYYY-MM-DD.md)]
     WORKER --> SKDIR[(skills/* + .data/skills/config.json)]
@@ -66,6 +67,7 @@ flowchart TB
 - `vm-worker` includes model routing that selects a profile chain (by job kind/metadata) and performs guarded fallback.
 - `vm-worker` enforces worker-local tool policy rules (allow/deny) during tool invocation.
 - `vm-worker` selects enabled local skills from `skills/*` and injects skill guidance into job prompt context.
+- `vm-worker` starts MCP servers for enabled skills at boot and registers their tools as native agent tools via the Pi SDK `customTools` API. The agent sees skill tools (e.g. `mcp__ynab__budget_summary`) directly in its tool list alongside built-in tools like `read`, `write`, `bash`.
 - `pi` SDK runs embedded in `vm-worker` (no subprocess).
 - `butler` CLI is the entrypoint for setup, health checks, local multi-service startup, and MCP CLI generation.
 - `butler tui` can submit and monitor test jobs directly against orchestrator using gateway-token auth.
@@ -153,6 +155,7 @@ The code follows the same boundaries shown above:
 - Orchestrator job queue/state machine and JSON persistence: `apps/orchestrator/src/store.ts`
 - Worker claim loop, heartbeat, and completion/failure flow: `apps/vm-worker/src/index.ts`
 - Worker Pi embedded session lifecycle: `apps/vm-worker/src/pi-embedded-session.ts`
+- Worker MCP skill tool registration (native tools from MCP servers): `apps/vm-worker/src/mcp-skill-tools.ts`
 - Worker model routing and fallback runtime: `apps/vm-worker/src/model-routing.ts`
 - Worker tool policy runtime: `apps/vm-worker/src/tool-policy.ts`
 - Shared schemas/contracts at API boundaries: `packages/contracts/src/index.ts`

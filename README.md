@@ -381,6 +381,17 @@ Butler supports a simplified personal skill architecture inspired by OpenClaw:
   - `skill.json` (metadata, required env vars, optional MCP tool definitions)
 - One config file: `.data/skills/config.json`
 
+### Native MCP tool registration
+
+Skills with `mcpServers` in `skill.json` get their MCP servers started at worker boot. Their tools are registered as **native agent tools** via the Pi SDK `customTools` API — the agent sees them directly (e.g. `mcp__ynab__budget_summary`) alongside built-in tools like `read`, `write`, `bash`. No CLI wrapper or shell invocation needed.
+
+Adding a new MCP-backed skill:
+1. Create `skills/<id>/skill.json` with `mcpServers` and `env` fields
+2. Create `skills/<id>/SKILL.md` with usage instructions
+3. Set required env vars in `.env`
+4. Run `npm run butler -- skills enable <id>`
+5. Restart Butler — the MCP server starts and tools appear automatically
+
 Skill CLI:
 
 ```bash
