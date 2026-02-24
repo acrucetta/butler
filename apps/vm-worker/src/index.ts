@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
-import { ModelRoutingRuntime } from "./model-routing.js";
+import { ModelRoutingRuntime, type ExecutionMode } from "./model-routing.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
 import { parseSkillsMode, resolveSkillsContext } from "./skills-runtime.js";
 import { ToolPolicyRuntime } from "./tool-policy.js";
@@ -38,6 +38,7 @@ process.env.PATH = prependPathEntry(mcpCliBinDir, process.env.PATH);
 
 const orchestrator = new OrchestratorClient(orchestratorBaseUrl, workerToken);
 const modelRouting = new ModelRoutingRuntime({
+  executionMode,
   piBinary,
   cwd: piCwd,
   sessionRoot: piSessionRoot,
@@ -66,10 +67,10 @@ await run();
 
 async function run(): Promise<void> {
   console.log(`[worker] started workerId=${workerId} mode=${executionMode} orchestrator=${orchestratorBaseUrl}`);
-  if (executionMode === "rpc") {
-    console.log(`[worker] rpc mode enabled with PI_BINARY=${piBinary}`);
-    console.log(`[worker] rpc workspace=${piCwd}`);
-    console.log(`[worker] rpc sessions=${piSessionRoot}`);
+  if (executionMode === "rpc" || executionMode === "embedded") {
+    console.log(`[worker] ${executionMode} mode enabled${executionMode === "rpc" ? ` with PI_BINARY=${piBinary}` : ""}`);
+    console.log(`[worker] ${executionMode} workspace=${piCwd}`);
+    console.log(`[worker] ${executionMode} sessions=${piSessionRoot}`);
     console.log(`[worker] model routing config=${modelRoutingConfigFile} source=${modelRouting.getSourceLabel()}`);
     console.log(`[worker] tool policy config=${toolPolicyConfigFile} source=${toolPolicy.getSourceLabel()}`);
     console.log(
@@ -371,11 +372,11 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-function parseExecutionMode(value: string): "mock" | "rpc" {
-  if (value === "mock" || value === "rpc") {
+function parseExecutionMode(value: string): ExecutionMode {
+  if (value === "mock" || value === "rpc" || value === "embedded") {
     return value;
   }
-  throw new Error(`Invalid PI_EXEC_MODE '${value}'. Expected 'mock' or 'rpc'.`);
+  throw new Error(`Invalid PI_EXEC_MODE '${value}'. Expected 'mock', 'rpc', or 'embedded'.`);
 }
 
 function requireSecret(name: string, value: string | undefined): string {

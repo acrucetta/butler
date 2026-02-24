@@ -12,6 +12,7 @@
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.52.8",
     "@pi-self/contracts": "file:../../packages/contracts"
   }
 }

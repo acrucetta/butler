@@ -3,6 +3,10 @@ import { dirname, resolve } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as readline from "node:readline";
 
+import type { PiPromptCallbacks, PiSession, PiSessionPool } from "./pi-session.js";
+
+export type { PiPromptCallbacks };
+
 interface PendingRequest {
   resolve: (value: RpcResponse) => void;
   reject: (error: Error) => void;
@@ -20,13 +24,6 @@ type RpcResponse = {
 
 type RpcEvent = Record<string, unknown>;
 
-export interface PiPromptCallbacks {
-  onTextDelta?: (delta: string) => void;
-  onToolStart?: (toolName: string, raw: RpcEvent) => void;
-  onToolEnd?: (toolName: string, raw: RpcEvent) => void;
-  onLog?: (message: string) => void;
-}
-
 export interface PiRpcSessionOptions {
   piBinary: string;
   cwd: string;
@@ -38,7 +35,7 @@ export interface PiRpcSessionOptions {
   env?: Record<string, string>;
 }
 
-export class PiRpcSession {
+export class PiRpcSession implements PiSession {
   private process: ChildProcessWithoutNullStreams | null = null;
   private rl: readline.Interface | null = null;
   private pending: Map<string, PendingRequest> = new Map();
@@ -332,7 +329,7 @@ export class PiRpcSession {
   }
 }
 
-export class PiRpcSessionPool {
+export class PiRpcSessionPool implements PiSessionPool {
   private readonly sessions = new Map<string, PiRpcSession>();
 
   constructor(

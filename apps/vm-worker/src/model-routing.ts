@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Job, JobKind } from "@pi-self/contracts";
-import { PiRpcSessionPool, type PiRpcSession } from "./pi-rpc-session.js";
+import { PiEmbeddedSessionPool } from "./pi-embedded-session.js";
+import { PiRpcSessionPool } from "./pi-rpc-session.js";
+import type { PiSession, PiSessionPool } from "./pi-session.js";
 
 const DEFAULT_RETRYABLE_ERROR_PATTERNS = [
   "rate limit",
@@ -73,7 +75,10 @@ export interface FallbackEvaluationInput {
   errorMessage: string;
 }
 
+export type ExecutionMode = "mock" | "rpc" | "embedded";
+
 interface RuntimeOptions {
+  executionMode: ExecutionMode;
   piBinary: string;
   cwd: string;
   sessionRoot: string;
@@ -87,7 +92,7 @@ interface RuntimeOptions {
 
 export class ModelRoutingRuntime {
   private readonly profilesById = new Map<string, ResolvedModelProfile>();
-  private readonly poolsById = new Map<string, PiRpcSessionPool>();
+  private readonly poolsById = new Map<string, PiSessionPool>();
   private readonly cooldownUntilMsByProfile = new Map<string, number>();
   private readonly routes: Required<NonNullable<RoutingConfig["routes"]>>;
   private readonly retryablePatterns: string[];
@@ -172,12 +177,22 @@ export class ModelRoutingRuntime {
     };
   }
 
-  getSession(profileId: string, sessionKey: string): PiRpcSession {
+  getSession(profileId: string, sessionKey: string): PiSession {
     const profile = this.requireProfile(profileId);
     let pool = this.poolsById.get(profile.id);
     if (!pool) {
-      pool = new PiRpcSessionPool({
-        piBinary: this.options.piBinary,
+      pool = this.createPool(profile);
+      this.poolsById.set(profile.id, pool);
+    }
+
+    // Keep profile-local session dirs to avoid cross-provider session state conflicts.
+    const profileSessionKey = `${profile.id}__${sessionKey}`;
+    return pool.getSession(profileSessionKey);
+  }
+
+  private createPool(profile: ResolvedModelProfile): PiSessionPool {
+    if (this.options.executionMode === "embedded") {
+      return new PiEmbeddedSessionPool({
         cwd: this.options.cwd,
         sessionRoot: this.options.sessionRoot,
         provider: profile.provider,
@@ -185,12 +200,17 @@ export class ModelRoutingRuntime {
         appendSystemPrompt: profile.appendSystemPrompt,
         env: profile.env
       });
-      this.poolsById.set(profile.id, pool);
     }
 
-    // Keep profile-local session dirs to avoid cross-provider session state conflicts.
-    const profileSessionKey = `${profile.id}__${sessionKey}`;
-    return pool.getSession(profileSessionKey);
+    return new PiRpcSessionPool({
+      piBinary: this.options.piBinary,
+      cwd: this.options.cwd,
+      sessionRoot: this.options.sessionRoot,
+      provider: profile.provider,
+      model: profile.model,
+      appendSystemPrompt: profile.appendSystemPrompt,
+      env: profile.env
+    });
   }
 
   evaluateFallback(profileId: string, input: FallbackEvaluationInput): { fallback: boolean; reason: string } {
