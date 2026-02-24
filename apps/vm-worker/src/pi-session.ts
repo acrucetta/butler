@@ -14,6 +14,12 @@ export interface PiPromptCallbacks {
 
 export interface PiSession {
   prompt(text: string, callbacks?: PiPromptCallbacks): Promise<string>;
+  /** Queue a message into the active prompt turn (delivered after current tool finishes). */
+  steer(text: string): Promise<void>;
+  /** True when the session is actively streaming a response. */
+  isStreaming(): boolean;
+  /** Update the system prompt for subsequent runs (refreshes personality/memory). */
+  setSystemPrompt(prompt: string): void;
   abort(): Promise<void>;
   stop(): Promise<void>;
 }

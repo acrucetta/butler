@@ -21,6 +21,7 @@ import {
   SessionManager,
   codingTools
 } from "@mariozechner/pi-coding-agent";
+import { limitHistoryTurns } from "./history.js";
 import type { PiPromptCallbacks, PiSession, PiSessionPool } from "./pi-session.js";
 
 export interface PiEmbeddedSessionOptions {
@@ -30,6 +31,10 @@ export interface PiEmbeddedSessionOptions {
   model?: string;
   appendSystemPrompt?: string;
   env?: Record<string, string>;
+  /** Max user turns to keep in history. Older turns are trimmed before each prompt. */
+  historyLimit?: number;
+  /** Full system prompt override applied before each prompt. */
+  systemPromptOverride?: string;
   /** Override for testing — inject a pre-built AuthStorage. */
   authStorage?: AuthStorage;
   /** Override for testing — inject a pre-built ModelRegistry. */
@@ -40,8 +45,11 @@ export class PiEmbeddedSession implements PiSession {
   private session: AgentSession | null = null;
   private startPromise: Promise<void> | null = null;
   private unsubscribe: (() => void) | null = null;
+  private currentSystemPrompt: string | undefined;
 
-  constructor(private readonly options: PiEmbeddedSessionOptions) {}
+  constructor(private readonly options: PiEmbeddedSessionOptions) {
+    this.currentSystemPrompt = options.systemPromptOverride;
+  }
 
   async start(): Promise<void> {
     if (this.session) return;
@@ -75,6 +83,36 @@ export class PiEmbeddedSession implements PiSession {
       finishReject?.(new Error("Pi embedded prompt timed out waiting for agent_end"));
     }, 15 * 60 * 1000);
 
+    // Override system prompt per-run if configured. This replaces the SDK's
+    // default prompt with our custom one (personality + memory + skills).
+    // Lock _rebuildSystemPrompt so the SDK doesn't overwrite it.
+    if (this.currentSystemPrompt) {
+      const prompt = this.currentSystemPrompt;
+      this.session.agent.setSystemPrompt(prompt);
+      const mutable = this.session as unknown as {
+        _baseSystemPrompt?: string;
+        _rebuildSystemPrompt?: (toolNames: string[]) => string;
+      };
+      mutable._baseSystemPrompt = prompt;
+      mutable._rebuildSystemPrompt = () => prompt;
+    }
+
+    // Trim old history before prompting to keep context window manageable.
+    // Uses agent.replaceMessages() like OpenClaw does after limitHistoryTurns().
+    if (this.options.historyLimit) {
+      const messages = this.session.messages;
+      const trimmed = limitHistoryTurns(messages, this.options.historyLimit);
+      if (trimmed.length < messages.length) {
+        this.session.agent.replaceMessages(trimmed);
+        callbacks.onLog?.(`History trimmed: ${messages.length} → ${trimmed.length} messages (limit=${this.options.historyLimit} turns)`);
+      }
+    }
+
+    // Truncate oversized tool results before prompting. Individual tool results
+    // that consume >30% of the context window bloat history and break compaction.
+    this.truncateOversizedToolResults(callbacks);
+
+    let compactionTimer: ReturnType<typeof setTimeout> | null = null;
     const unsub = this.session.subscribe((event: AgentSessionEvent) => {
       if (event.type === "message_update") {
         const assistantEvent = (event as Record<string, unknown>).assistantMessageEvent;
@@ -108,9 +146,18 @@ export class PiEmbeddedSession implements PiSession {
 
       if (event.type === "auto_compaction_start") {
         callbacks.onLog?.(`Auto-compaction started (reason=${event.reason})`);
+        // Safety timeout: abort compaction if it takes longer than 5 minutes
+        compactionTimer = setTimeout(() => {
+          callbacks.onLog?.("Auto-compaction safety timeout (5min) — aborting");
+          this.session?.abortCompaction();
+        }, 5 * 60 * 1000);
       }
 
       if (event.type === "auto_compaction_end") {
+        if (compactionTimer) {
+          clearTimeout(compactionTimer);
+          compactionTimer = null;
+        }
         const status = event.aborted ? "aborted" : event.result ? "completed" : "failed";
         callbacks.onLog?.(`Auto-compaction ${status}`);
       }
@@ -133,8 +180,23 @@ export class PiEmbeddedSession implements PiSession {
       return result ?? "";
     } finally {
       clearTimeout(timeout);
+      if (compactionTimer) clearTimeout(compactionTimer);
       unsub();
     }
+  }
+
+  setSystemPrompt(prompt: string): void {
+    this.currentSystemPrompt = prompt;
+  }
+
+  async steer(text: string): Promise<void> {
+    if (this.session && this.session.isStreaming) {
+      await this.session.steer(text);
+    }
+  }
+
+  isStreaming(): boolean {
+    return this.session?.isStreaming ?? false;
   }
 
   async abort(): Promise<void> {
@@ -152,6 +214,35 @@ export class PiEmbeddedSession implements PiSession {
     if (this.session) {
       this.session.dispose();
       this.session = null;
+    }
+  }
+
+  /**
+   * Truncate individual tool results that are disproportionately large.
+   * A single oversized tool result (e.g., a huge file read) can consume most
+   * of the context window and cause compaction to fail.
+   */
+  private truncateOversizedToolResults(callbacks: PiPromptCallbacks): void {
+    if (!this.session) return;
+
+    const MAX_TOOL_RESULT_CHARS = 100_000; // ~25K tokens
+    const messages = this.session.messages;
+    let mutated = false;
+
+    for (const msg of messages) {
+      // toolResult messages have content arrays; check each item
+      if (msg.role !== "toolResult") continue;
+      const raw = msg as unknown as { content: unknown };
+      if (typeof raw.content === "string" && raw.content.length > MAX_TOOL_RESULT_CHARS) {
+        raw.content = raw.content.slice(0, MAX_TOOL_RESULT_CHARS) +
+          `\n\n[truncated: original was ${raw.content.length} chars]`;
+        mutated = true;
+      }
+    }
+
+    if (mutated) {
+      this.session.agent.replaceMessages(messages);
+      callbacks.onLog?.("Truncated oversized tool results in session history");
     }
   }
 
@@ -220,6 +311,7 @@ export interface PiEmbeddedSessionPoolOptions {
   model?: string;
   appendSystemPrompt?: string;
   env?: Record<string, string>;
+  historyLimit?: number;
   authStorage?: AuthStorage;
   modelRegistry?: ModelRegistry;
 }
@@ -242,6 +334,7 @@ export class PiEmbeddedSessionPool implements PiSessionPool {
       model: this.options.model,
       appendSystemPrompt: this.options.appendSystemPrompt,
       env: this.options.env,
+      historyLimit: this.options.historyLimit,
       authStorage: this.options.authStorage,
       modelRegistry: this.options.modelRegistry
     });

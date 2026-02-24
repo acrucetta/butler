@@ -81,6 +81,7 @@ interface RuntimeOptions {
   cwd: string;
   sessionRoot: string;
   appendSystemPrompt: string;
+  historyLimit?: number;
   defaultProvider?: string;
   defaultModel?: string;
   configFilePath?: string;
@@ -195,7 +196,8 @@ export class ModelRoutingRuntime {
       provider: profile.provider,
       model: profile.model,
       appendSystemPrompt: profile.appendSystemPrompt,
-      env: profile.env
+      env: profile.env,
+      historyLimit: this.options.historyLimit
     });
   }
 

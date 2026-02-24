@@ -4,6 +4,7 @@ import { delimiter, resolve } from "node:path";
 import type { Job, JobEvent, JobEventType } from "@pi-self/contracts";
 import { ModelRoutingRuntime, type ExecutionMode } from "./model-routing.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
+import type { PiSession } from "./pi-session.js";
 import { parseSkillsMode, resolveSkillsContext } from "./skills-runtime.js";
 import { ToolPolicyRuntime } from "./tool-policy.js";
 
@@ -28,6 +29,7 @@ const skillsModeOverride = parseSkillsMode(process.env.PI_SKILLS_MODE);
 const skillsContextWindowOverride = parsePositiveInt(process.env.PI_SKILLS_CONTEXT_WINDOW);
 const skillsMaxCharsOverride = parsePositiveInt(process.env.PI_SKILLS_MAX_CHARS);
 const skillsDir = process.env.PI_SKILLS_DIR ? resolve(process.env.PI_SKILLS_DIR) : undefined;
+const historyLimit = parsePositiveInt(process.env.PI_HISTORY_LIMIT) ?? 30;
 
 mkdirSync(piCwd, { recursive: true });
 mkdirSync(piSessionRoot, { recursive: true });
@@ -41,6 +43,7 @@ const modelRouting = new ModelRoutingRuntime({
   cwd: piCwd,
   sessionRoot: piSessionRoot,
   appendSystemPrompt: piAppendSystemPrompt,
+  historyLimit,
   defaultProvider: piProvider,
   defaultModel: piModel,
   configFilePath: modelRoutingConfigFile,
@@ -52,6 +55,9 @@ const toolPolicy = new ToolPolicyRuntime({
   requireConfigFile: toolPolicyConfigRequired,
   logger: console
 });
+
+/** Active sessions by sessionKey — enables steer() for messages arriving mid-run. */
+const activeRuns = new Map<string, PiSession>();
 
 let shuttingDown = false;
 
@@ -104,8 +110,24 @@ async function runJob(job: Job): Promise<void> {
     return;
   }
 
+  // If this session already has an active run, steer the message in instead
+  // of starting a separate prompt. This preserves conversational flow when
+  // the user sends multiple Telegram messages while the agent is working.
+  const existingRun = activeRuns.get(job.sessionKey);
+  if (existingRun && existingRun.isStreaming()) {
+    console.log(`[worker] steering message into active session=${job.sessionKey} job=${job.id}`);
+    await postEvent(job.id, "log", "Steered into active session");
+    try {
+      await existingRun.steer(job.prompt);
+      await orchestrator.complete(job.id, "(steered into active session)");
+    } catch (error) {
+      await orchestrator.fail(job.id, `Steer failed: ${formatError(error)}`);
+    }
+    return;
+  }
+
   let abortRequested = false;
-  let activeSession: { abort: () => Promise<void> } | null = null;
+  let activeSession: PiSession | null = null;
   let heartbeatActive = false;
   const heartbeatTimer = setInterval(() => {
     if (heartbeatActive) {
@@ -207,6 +229,14 @@ async function runJob(job: Job): Promise<void> {
 
       const session = modelRouting.getSession(profile.id, job.sessionKey);
       activeSession = session;
+      activeRuns.set(job.sessionKey, session);
+
+      // Refresh the system prompt with latest workspace context (SOUL.md, MEMORY.md, skills).
+      // This runs before each prompt so personality/memory changes take effect immediately.
+      const systemPrompt = buildSystemPromptContext(piCwd, skillsContext.context);
+      if (systemPrompt) {
+        session.setSystemPrompt(systemPrompt);
+      }
 
       try {
         let policyViolationMessage: string | null = null;
@@ -304,6 +334,7 @@ async function runJob(job: Job): Promise<void> {
     await orchestrator.fail(job.id, message);
     console.error(`[worker] job failed job=${job.id}: ${message}`);
   } finally {
+    activeRuns.delete(job.sessionKey);
     clearInterval(heartbeatTimer);
     clearInterval(deltaTimer);
   }
@@ -500,6 +531,42 @@ function buildPromptWithWorkspaceContext(userPrompt: string, workspaceRoot: stri
     "## User request",
     userPrompt
   ].join("\n\n");
+}
+
+function buildSystemPromptContext(workspaceRoot: string, skillsContext: string): string {
+  const soulPath = resolve(workspaceRoot, "SOUL.md");
+  const memoryPath = resolve(workspaceRoot, "MEMORY.md");
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const dailyFiles = [today, yesterday].map((value) =>
+    resolve(workspaceRoot, "memory", `${formatLocalDate(value)}.md`)
+  );
+
+  const sections: string[] = [defaultMemoryPrompt()];
+  const soul = readTextIfExists(soulPath, 5_000);
+  if (soul) {
+    sections.push(`## SOUL.md\n${soul}`);
+  }
+
+  const durable = readTextIfExists(memoryPath, 5_000);
+  if (durable) {
+    sections.push(`## MEMORY.md\n${durable}`);
+  }
+
+  for (const filePath of dailyFiles) {
+    const daily = readTextIfExists(filePath, 3_000);
+    if (daily) {
+      const name = filePath.split("/").at(-1) ?? "memory.md";
+      sections.push(`## memory/${name}\n${daily}`);
+    }
+  }
+
+  if (skillsContext.trim().length > 0) {
+    sections.push(`## SKILLS\n${skillsContext}`);
+  }
+
+  return sections.join("\n\n");
 }
 
 function parsePositiveInt(value: string | undefined): number | null {
