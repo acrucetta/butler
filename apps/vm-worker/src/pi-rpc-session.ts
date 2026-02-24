@@ -181,7 +181,7 @@ export class PiRpcSession {
     mkdirSync(dirname(sessionDir), { recursive: true });
     mkdirSync(sessionDir, { recursive: true });
 
-    const args = ["--mode", "rpc", "--session-dir", sessionDir];
+    const args = ["--mode", "rpc", "--session-dir", sessionDir, "--continue"];
     if (this.options.provider) {
       args.push("--provider", this.options.provider);
     }
