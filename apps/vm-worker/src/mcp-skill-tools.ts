@@ -78,10 +78,16 @@ export class McpSkillToolsRuntime {
     config: SkillMcpServer,
     log?: (msg: string) => void
   ): Promise<McpConnection> {
+    const mergedEnv = { ...process.env, ...(config.env ?? {}) } as Record<string, string>;
+    // Expand $ENV_VAR references in args so skills can use env vars for paths.
+    const expandedArgs = config.args?.map((arg) =>
+      arg.replace(/\$([A-Z_][A-Z0-9_]*)/g, (_match, name) => mergedEnv[name] ?? "")
+    );
+
     const transport = new StdioClientTransport({
       command: config.command,
-      args: config.args,
-      env: { ...process.env, ...(config.env ?? {}) } as Record<string, string>,
+      args: expandedArgs,
+      env: mergedEnv,
     });
 
     const client = new Client(

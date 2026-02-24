@@ -1,0 +1,30 @@
+{
+  "id": "obsidian",
+  "name": "Obsidian Notes",
+  "description": "Read, create, search, and manage markdown notes in an Obsidian vault.",
+  "tags": ["notes", "obsidian", "markdown", "writing", "journal", "knowledge", "vault", "tags"],
+  "env": [
+    "OBSIDIAN_VAULT_PATH"
+  ],
+  "tools": {
+    "mcpServers": {
+      "obsidian": {
+        "description": "Obsidian vault MCP server for markdown note management",
+        "command": "npx",
+        "args": [
+          "-y",
+          "obsidian-mcp",
+          "$OBSIDIAN_VAULT_PATH"
+        ]
+      }
+    },
+    "targets": [
+      {
+        "name": "obsidian",
+        "selector": "obsidian",
+        "emitTypes": true,
+        "timeoutMs": 120000
+      }
+    ]
+  }
+}
