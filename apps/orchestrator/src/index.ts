@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   AdminStateSchema,
   ClaimJobRequestSchema,
@@ -19,19 +20,28 @@ import { MemoryService } from "./memory-service.js";
 import { MemorySemanticIndex } from "./memory-semantic-index.js";
 import { ProactiveRuntime } from "./proactive-runtime.js";
 import { OrchestratorStore } from "./store.js";
+import { loadJsonWithLegacyFallback } from "./config-paths.js";
 
 const port = Number(process.env.ORCH_PORT ?? "8787");
 const host = process.env.ORCH_HOST ?? "127.0.0.1";
-const statePath = resolve(process.env.ORCH_STATE_FILE ?? ".data/orchestrator/state.json");
+const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const workspaceRoot = resolve(process.env.BUTLER_WORKSPACE_ROOT ?? moduleRoot);
+const statePath = resolve(workspaceRoot, process.env.ORCH_STATE_FILE ?? ".data/orchestrator/state.json");
 const proactiveConfigPath = resolve(
+  workspaceRoot,
   process.env.ORCH_PROACTIVE_CONFIG_FILE ?? ".data/orchestrator/proactive-runtime.json"
 );
-const memoryRoot = resolve(process.env.ORCH_MEMORY_ROOT ?? process.cwd());
-const memoryLedgerPath = resolve(process.env.ORCH_MEMORY_LEDGER_FILE ?? ".data/orchestrator/memory-ledger.jsonl");
-const memoryIndexPath = resolve(process.env.ORCH_MEMORY_INDEX_FILE ?? ".data/orchestrator/memory-index.json");
+const legacyProactiveConfigPath = resolve(workspaceRoot, "apps/orchestrator/.data/orchestrator/proactive-runtime.json");
+const memoryRoot = resolve(workspaceRoot, process.env.ORCH_MEMORY_ROOT ?? ".");
+const memoryLedgerPath = resolve(workspaceRoot, process.env.ORCH_MEMORY_LEDGER_FILE ?? ".data/orchestrator/memory-ledger.jsonl");
+const memoryIndexPath = resolve(workspaceRoot, process.env.ORCH_MEMORY_INDEX_FILE ?? ".data/orchestrator/memory-index.json");
+const upStatusPath = resolve(workspaceRoot, process.env.BUTLER_UP_STATUS_FILE ?? ".data/runtime/up-status.json");
 const ownerChatId = process.env.ORCH_OWNER_CHAT_ID ?? "";
 const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWAY_TOKEN);
 const workerToken = requireSecret("ORCH_WORKER_TOKEN", process.env.ORCH_WORKER_TOKEN);
+const staleJobReaperEnabled = parseBoolean(process.env.ORCH_STALE_JOB_REAPER_ENABLED, true);
+const staleJobIdleMs = parseIntWithFallback(process.env.ORCH_STALE_JOB_IDLE_MS, 5 * 60_000);
+const staleJobReaperTickMs = parseIntWithFallback(process.env.ORCH_STALE_JOB_REAPER_TICK_MS, 30_000);
 
 mkdirSync(dirname(statePath), { recursive: true });
 mkdirSync(dirname(proactiveConfigPath), { recursive: true });
@@ -49,6 +59,20 @@ const proactive = new ProactiveRuntime(
   { onConfigChange: (nextConfig) => persistProactiveConfig(proactiveConfigPath, nextConfig) }
 );
 proactive.start();
+let staleJobReaperTimer: NodeJS.Timeout | null = null;
+if (staleJobReaperEnabled) {
+  const runStaleReaper = () => {
+    const reaped = store.reapStaleActiveJobs(staleJobIdleMs);
+    if (reaped.length > 0) {
+      console.warn(
+        `[orchestrator] stale-job reaper handled ${reaped.length} job(s): ${reaped.map((job) => `${job.id}:${job.status}`).join(", ")}`
+      );
+    }
+  };
+
+  runStaleReaper();
+  staleJobReaperTimer = setInterval(runStaleReaper, staleJobReaperTickMs);
+}
 const app = express();
 
 app.use(express.json({ limit: "1mb" }));
@@ -115,6 +139,21 @@ app.post("/v1/jobs/:jobId/abort", requireApiKey(gatewayToken), (req, res) => {
 
 app.get("/v1/admin/state", requireApiKey(gatewayToken), (_req, res) => {
   res.json({ admin: AdminStateSchema.parse(store.getAdminState()) });
+});
+
+app.get("/v1/admin/services", requireApiKey(gatewayToken), (_req, res) => {
+  const status = store.getServiceStatus() ?? loadUpStatus(upStatusPath);
+  res.json({ services: status });
+});
+
+app.post("/v1/admin/services/state", requireApiKey(workerToken), (req, res, next) => {
+  try {
+    const body = z.object({ services: z.unknown() }).parse(req.body ?? {});
+    store.setServiceStatus(body.services);
+    res.status(202).json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/v1/proactive/state", requireApiKey(gatewayToken), (_req, res) => {
@@ -235,6 +274,7 @@ app.post("/v1/workers/:jobId/events", requireApiKey(workerToken), (req, res, nex
 });
 
 app.get("/v1/workers/:jobId/heartbeat", requireApiKey(workerToken), (req, res) => {
+  store.touchJobHeartbeat(req.params.jobId);
   const abortRequested = store.getAbortRequested(req.params.jobId);
   res.json(WorkerHeartbeatResponseSchema.parse({ abortRequested }));
 });
@@ -486,7 +526,28 @@ app.listen(port, host, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     proactive.stop();
+    if (staleJobReaperTimer) {
+      clearInterval(staleJobReaperTimer);
+      staleJobReaperTimer = null;
+    }
   });
+}
+
+function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
+  if (!raw) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseIntWithFallback(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
 }
 
 function requireApiKey(expected: string) {
@@ -518,9 +579,7 @@ function requireSecret(name: string, value: string | undefined): string {
 }
 
 function loadProactiveConfig(filePath: string): unknown {
-  const config: Record<string, unknown> = existsSync(filePath)
-    ? JSON.parse(readFileSync(filePath, "utf8"))
-    : {};
+  const config = loadJsonWithLegacyFallback(filePath, legacyProactiveConfigPath) as Record<string, unknown>;
 
   if (ownerChatId) {
     const heartbeats = Array.isArray(config.heartbeatRules) ? config.heartbeatRules : [];
@@ -550,4 +609,16 @@ function loadProactiveConfig(filePath: string): unknown {
 function persistProactiveConfig(filePath: string, config: unknown): void {
   const payload = JSON.stringify(config, null, 2);
   writeFileSync(filePath, `${payload}\n`, "utf8");
+}
+
+function loadUpStatus(filePath: string): unknown {
+  if (!existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8"));
+  } catch {
+    return { error: "invalid_status_file", path: filePath };
+  }
 }

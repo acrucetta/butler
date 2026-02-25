@@ -5,6 +5,7 @@ import { OrchestratorClient } from "./orchestrator-client.js";
 import { PairingStore } from "./pairing-store.js";
 import { SessionStore } from "./session-store.js";
 import { toTelegramMarkdownV2 } from "./telegram-markdown.js";
+import { startTypingIndicator } from "./typing-indicator.js";
 
 interface ChatCompletionsResponse {
   choices?: Array<{
@@ -57,6 +58,8 @@ const allowRequesterAbort = parseBoolean(process.env.TG_ALLOW_REQUESTER_ABORT, t
 const notifyToolEvents = parseBoolean(process.env.TG_NOTIFY_TOOL_EVENTS, false);
 const onlyAgentOutput = parseBoolean(process.env.TG_ONLY_AGENT_OUTPUT, true);
 const agentMarkdownV2 = parseBoolean(process.env.TG_AGENT_MARKDOWNV2, true);
+const typingEnabled = parseBoolean(process.env.TG_TYPING_ENABLED, true);
+const typingHeartbeatMs = Math.max(1_000, parsePositiveInt(process.env.TG_TYPING_HEARTBEAT_MS, 4_000));
 const mediaEnabled = parseBoolean(process.env.TG_MEDIA_ENABLED, true);
 const mediaMaxFileMb = parsePositiveInt(process.env.TG_MEDIA_MAX_FILE_MB, 20);
 const mediaMaxFileBytes = mediaMaxFileMb * 1024 * 1024;
@@ -920,6 +923,11 @@ async function trackJob(chatId: string, threadId: string | undefined, jobId: str
   }
 
   activeTrackers.add(jobId);
+  const typingIndicator = startTypingIndicator({
+    enabled: typingEnabled,
+    intervalMs: typingHeartbeatMs,
+    tick: () => sendTypingAction(chatId, threadId)
+  });
   let cursor = 0;
   let runningNotified = false;
 
@@ -950,6 +958,7 @@ async function trackJob(chatId: string, threadId: string | undefined, jobId: str
   } catch (error) {
     await sendThreadMessage(chatId, threadId, `Tracking failed for ${jobId}: ${formatError(error)}`);
   } finally {
+    typingIndicator.stop();
     activeTrackers.delete(jobId);
   }
 }
@@ -1020,6 +1029,23 @@ async function sendThreadMessage(
   await bot.api.sendMessage(chat, text, {
     message_thread_id: messageThreadId
   });
+}
+
+async function sendTypingAction(chatId: string, threadId: string | undefined): Promise<void> {
+  const chat = Number(chatId);
+  if (Number.isNaN(chat)) {
+    return;
+  }
+
+  const thread = threadId ? Number(threadId) : undefined;
+  const messageThreadId = threadId && !Number.isNaN(thread) ? thread : undefined;
+  try {
+    await bot.api.sendChatAction(chat, "typing", {
+      message_thread_id: messageThreadId
+    });
+  } catch {
+    // best-effort signal only
+  }
 }
 
 function renderJobStatus(job: Job): string {

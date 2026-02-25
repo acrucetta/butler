@@ -44,6 +44,11 @@ interface RuntimeStats {
   lastCronTickAt?: string;
   lastWebhookAt?: string;
   lastError?: string;
+  cronEnqueued?: number;
+  cronSkippedDuplicateActive?: number;
+  cronSkippedDuplicateCompleted?: number;
+  cronSkippedBackoff?: number;
+  cronMissedWindows?: number;
 }
 
 export interface ProactiveRuntimeState {
@@ -62,7 +67,7 @@ export interface WebhookTriggerResult {
 }
 
 export interface TriggerRuleResult {
-  status: "enqueued" | "duplicate_active_job" | "backoff_blocked" | "not_found";
+  status: "enqueued" | "duplicate_active_job" | "duplicate_completed_job" | "backoff_blocked" | "not_found";
   jobId?: string;
 }
 
@@ -80,6 +85,7 @@ export class ProactiveRuntime {
   private readonly failureStreakByTrigger = new Map<string, number>();
   private readonly blockedUntilByTriggerMs = new Map<string, number>();
   private readonly lastTerminalSeenByTrigger = new Map<string, string>();
+  private lastCronTickMs: number | undefined;
   private timer: NodeJS.Timeout | undefined;
   private readonly stats: RuntimeStats = {};
   private readonly onConfigChange?: (config: ProactiveConfig) => void;
@@ -233,10 +239,13 @@ export class ProactiveRuntime {
       return { status: "not_found" };
     }
 
+    const idempotencyKey = buildCronIdempotencyKey(rule, new Date());
     const target = this.resolveTarget(rule, rule.target);
     const result = this.enqueue("cron", rule.id, rule.prompt, target, {
-      proactiveManualTrigger: "true"
+      proactiveManualTrigger: "true",
+      ...(idempotencyKey ? { proactiveIdempotencyKey: idempotencyKey } : {})
     }, rule.delivery);
+    this.recordCronResult(result.status);
     if (result.status !== "enqueued") {
       return { status: result.status };
     }
@@ -267,6 +276,9 @@ export class ProactiveRuntime {
 
     const result = this.enqueue("webhook", rule.id, prompt, rule.target, metadata);
     if (result.status !== "enqueued") {
+      if (result.status === "duplicate_completed_job") {
+        return { status: "duplicate_active_job" };
+      }
       return { status: result.status };
     }
 
@@ -311,6 +323,7 @@ export class ProactiveRuntime {
             { proactiveWakeMode: "next-heartbeat" },
             rule.delivery
           );
+          this.recordCronResult(result.status);
           if (result.status === "enqueued" || result.status === "duplicate_active_job") {
             this.pendingMainWakeCronRules.delete(rule.id);
           }
@@ -318,6 +331,13 @@ export class ProactiveRuntime {
       }
 
       this.stats.lastCronTickAt = now.toISOString();
+      if (this.lastCronTickMs !== undefined) {
+        const missed = computeMissedCronWindows(this.lastCronTickMs, nowMs);
+        if (missed > 0) {
+          this.stats.cronMissedWindows = (this.stats.cronMissedWindows ?? 0) + missed;
+        }
+      }
+      this.lastCronTickMs = nowMs;
       const minuteKey = toMinuteKey(now);
       const nextCronRules: ProactiveCronRule[] = [];
       let cronRulesChanged = false;
@@ -341,7 +361,16 @@ export class ProactiveRuntime {
           }
 
           const target = this.resolveTarget(rule, rule.target);
-          this.enqueue("cron", rule.id, rule.prompt, target, undefined, rule.delivery);
+          const idempotencyKey = buildCronIdempotencyKey(rule, now);
+          this.enqueue(
+            "cron",
+            rule.id,
+            rule.prompt,
+            target,
+            idempotencyKey ? { proactiveIdempotencyKey: idempotencyKey } : undefined,
+            rule.delivery
+          );
+          this.recordCronResult("enqueued");
           this.lastCronMinuteKey.set(rule.id, minuteKey);
           nextCronRules.push(rule);
           continue;
@@ -360,7 +389,8 @@ export class ProactiveRuntime {
             continue;
           }
           const target = this.resolveTarget(rule, rule.target);
-          this.enqueue("cron", rule.id, rule.prompt, target, undefined, rule.delivery);
+          const result = this.enqueue("cron", rule.id, rule.prompt, target, undefined, rule.delivery);
+          this.recordCronResult(result.status);
           this.nextEveryAtMs.set(rule.id, nowMs + rule.everySeconds * 1000);
           nextCronRules.push(rule);
           continue;
@@ -379,7 +409,16 @@ export class ProactiveRuntime {
           }
 
           const target = this.resolveTarget(rule, rule.target);
-          const result = this.enqueue("cron", rule.id, rule.prompt, target, undefined, rule.delivery);
+          const idempotencyKey = buildCronIdempotencyKey(rule, now);
+          const result = this.enqueue(
+            "cron",
+            rule.id,
+            rule.prompt,
+            target,
+            idempotencyKey ? { proactiveIdempotencyKey: idempotencyKey } : undefined,
+            rule.delivery
+          );
+          this.recordCronResult(result.status);
           if (result.status !== "enqueued") {
             nextCronRules.push(rule);
             continue;
@@ -411,7 +450,7 @@ export class ProactiveRuntime {
     target: ProactiveTarget,
     metadata?: Record<string, string>,
     delivery?: ProactiveDelivery
-  ): { status: "enqueued"; job: Job } | { status: "duplicate_active_job" | "backoff_blocked" } {
+  ): { status: "enqueued"; job: Job } | { status: "duplicate_active_job" | "duplicate_completed_job" | "backoff_blocked" } {
     const triggerKey = `${kind}:${triggerId}`;
     if (kind !== "webhook") {
       this.refreshBackoffState(triggerKey);
@@ -423,6 +462,14 @@ export class ProactiveRuntime {
 
     if (this.store.hasActiveJobByMetadata("proactiveTriggerKey", triggerKey)) {
       return { status: "duplicate_active_job" };
+    }
+
+    const idempotencyKey = metadata?.proactiveIdempotencyKey;
+    if (idempotencyKey) {
+      const latest = this.store.getLatestTerminalJobByMetadata("proactiveIdempotencyKey", idempotencyKey);
+      if (latest?.status === "completed") {
+        return { status: "duplicate_completed_job" };
+      }
     }
 
     const now = new Date().toISOString();
@@ -492,6 +539,22 @@ export class ProactiveRuntime {
 
   private persistConfig(): void {
     this.onConfigChange?.(this.config);
+  }
+
+  private recordCronResult(status: "enqueued" | "duplicate_active_job" | "duplicate_completed_job" | "backoff_blocked"): void {
+    if (status === "enqueued") {
+      this.stats.cronEnqueued = (this.stats.cronEnqueued ?? 0) + 1;
+      return;
+    }
+    if (status === "duplicate_active_job") {
+      this.stats.cronSkippedDuplicateActive = (this.stats.cronSkippedDuplicateActive ?? 0) + 1;
+      return;
+    }
+    if (status === "duplicate_completed_job") {
+      this.stats.cronSkippedDuplicateCompleted = (this.stats.cronSkippedDuplicateCompleted ?? 0) + 1;
+      return;
+    }
+    this.stats.cronSkippedBackoff = (this.stats.cronSkippedBackoff ?? 0) + 1;
   }
 }
 
@@ -565,6 +628,50 @@ function simplePayloadHash(payload: unknown): string {
 
 function toMinuteKey(date: Date): string {
   return date.toISOString().slice(0, 16);
+}
+
+export function computeMissedCronWindows(lastTickMs: number, nowMs: number): number {
+  if (!Number.isFinite(lastTickMs) || !Number.isFinite(nowMs) || nowMs <= lastTickMs) {
+    return 0;
+  }
+  const prevMinute = Math.floor(lastTickMs / 60_000);
+  const currentMinute = Math.floor(nowMs / 60_000);
+  return Math.max(0, currentMinute - prevMinute - 1);
+}
+
+export function buildCronIdempotencyKey(rule: ProactiveCronRule, now: Date): string | undefined {
+  if (rule.at) {
+    return `cron:${rule.id}:at:${rule.at}`;
+  }
+
+  if (!rule.cron) {
+    return undefined;
+  }
+
+  const [minute = "*", hour = "*"] = rule.cron.trim().split(/\s+/);
+  if (isSingleCronValue(minute) && isSingleCronValue(hour)) {
+    return `cron:${rule.id}:date:${dateKeyInTimezone(now, rule.timezone)}`;
+  }
+
+  return `cron:${rule.id}:minute:${toMinuteKey(now)}`;
+}
+
+function isSingleCronValue(part: string): boolean {
+  return /^[0-9]+$/.test(part.trim());
+}
+
+function dateKeyInTimezone(now: Date, timezone: string | undefined): string {
+  if (!timezone) {
+    return now.toISOString().slice(0, 10);
+  }
+
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return formatter.format(now);
 }
 
 function assertCronExpression(expr: string): void {

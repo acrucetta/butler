@@ -10,6 +10,7 @@ interface PersistedState {
   paused: boolean;
   pauseReason?: string;
   pauseUpdatedAt: string;
+  serviceStatus?: unknown;
 }
 
 const initialState: PersistedState = {
@@ -17,7 +18,8 @@ const initialState: PersistedState = {
   events: {},
   queue: [],
   paused: false,
-  pauseUpdatedAt: nowIso()
+  pauseUpdatedAt: nowIso(),
+  serviceStatus: undefined
 };
 
 const MAX_EVENTS_PER_JOB = 5_000;
@@ -158,6 +160,9 @@ export class OrchestratorStore {
       const job = this.state.jobs[id];
       if (!job) continue;
       if (job.status !== "queued") continue;
+      if (this.skipDuplicateIdempotentJob(job)) {
+        continue;
+      }
 
       job.status = "running";
       job.workerId = workerId;
@@ -173,6 +178,15 @@ export class OrchestratorStore {
     }
 
     return undefined;
+  }
+
+  setServiceStatus(status: unknown): void {
+    this.state.serviceStatus = status;
+    this.save();
+  }
+
+  getServiceStatus(): unknown {
+    return structuredClone(this.state.serviceStatus);
   }
 
   appendWorkerEvent(jobId: string, event: JobEvent): Job | undefined {
@@ -194,6 +208,20 @@ export class OrchestratorStore {
   getAbortRequested(jobId: string): boolean {
     const job = this.state.jobs[jobId];
     return Boolean(job?.abortRequested);
+  }
+
+  touchJobHeartbeat(jobId: string): boolean {
+    const job = this.state.jobs[jobId];
+    if (!job) {
+      return false;
+    }
+    if (job.status !== "running" && job.status !== "aborting") {
+      return false;
+    }
+
+    job.updatedAt = nowIso();
+    this.save();
+    return true;
   }
 
   completeJob(jobId: string, resultText: string): Job | undefined {
@@ -359,6 +387,58 @@ export class OrchestratorStore {
     return structuredClone(job);
   }
 
+  reapStaleActiveJobs(maxIdleMs: number, nowMs = Date.now()): Job[] {
+    if (!Number.isFinite(maxIdleMs) || maxIdleMs <= 0) {
+      return [];
+    }
+
+    const now = Math.floor(nowMs);
+    const reaped: Job[] = [];
+    for (const job of Object.values(this.state.jobs)) {
+      if (job.status !== "running" && job.status !== "aborting") {
+        continue;
+      }
+
+      const updatedMs = Date.parse(job.updatedAt);
+      if (!Number.isFinite(updatedMs)) {
+        continue;
+      }
+      if (now - updatedMs < maxIdleMs) {
+        continue;
+      }
+
+      if (job.status === "aborting") {
+        job.status = "aborted";
+        job.abortRequested = true;
+        job.updatedAt = nowIso();
+        job.finishedAt = job.updatedAt;
+        this.pushEvent(job.id, {
+          type: "job_aborted",
+          ts: job.updatedAt,
+          message: "Job auto-aborted by stale-job reaper (worker heartbeat timeout)"
+        });
+      } else {
+        job.status = "failed";
+        job.error = "stale_running_timeout: worker heartbeat timeout";
+        job.updatedAt = nowIso();
+        job.finishedAt = job.updatedAt;
+        this.pushEvent(job.id, {
+          type: "job_failed",
+          ts: job.updatedAt,
+          message: "Job auto-failed by stale-job reaper (worker heartbeat timeout)"
+        });
+      }
+
+      reaped.push(structuredClone(job));
+    }
+
+    if (reaped.length > 0) {
+      this.save();
+    }
+
+    return reaped;
+  }
+
   private removeFromQueue(id: string): void {
     this.state.queue = this.state.queue.filter((queuedId) => queuedId !== id);
   }
@@ -393,7 +473,8 @@ export class OrchestratorStore {
         queue: parsed.queue ?? [],
         paused: parsed.paused ?? false,
         pauseReason: parsed.pauseReason,
-        pauseUpdatedAt: parsed.pauseUpdatedAt ?? nowIso()
+        pauseUpdatedAt: parsed.pauseUpdatedAt ?? nowIso(),
+        serviceStatus: parsed.serviceStatus
       };
     } catch {
       return cloneState(initialState);
@@ -404,5 +485,30 @@ export class OrchestratorStore {
     const tempPath = `${this.filePath}.tmp`;
     writeFileSync(tempPath, JSON.stringify(this.state, null, 2), "utf8");
     renameSync(tempPath, this.filePath);
+  }
+
+  private skipDuplicateIdempotentJob(job: Job): boolean {
+    const key = job.metadata?.proactiveIdempotencyKey;
+    if (!key) {
+      return false;
+    }
+
+    const latest = this.getLatestTerminalJobByMetadata("proactiveIdempotencyKey", key);
+    if (!latest || latest.status !== "completed" || latest.id === job.id) {
+      return false;
+    }
+
+    job.status = "completed";
+    job.resultText = "__SKIPPED_IDEMPOTENT__";
+    job.error = undefined;
+    job.updatedAt = nowIso();
+    job.finishedAt = nowIso();
+    this.pushEvent(job.id, {
+      type: "job_finished",
+      ts: nowIso(),
+      message: `Job skipped due to idempotency key ${key}`
+    });
+    this.save();
+    return true;
   }
 }

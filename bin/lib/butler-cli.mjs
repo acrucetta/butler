@@ -20,6 +20,10 @@ import {
   saveSkillsConfig,
   writeSkillScaffold
 } from "./skills-lib.mjs";
+import { acquireUpLock } from "./up-lock.mjs";
+import { createUpStatusStore, readUpStatus } from "./up-status.mjs";
+import { getBuildArtifactIssue } from "./build-artifact-check.mjs";
+import { assertUpOwnerAllowed } from "./up-owner-guard.mjs";
 
 const REQUIRED_KEYS = [
   "ORCH_GATEWAY_TOKEN",
@@ -41,6 +45,9 @@ const DEFAULT_TUI_REQUESTER_ID = "butler-tui";
 const DEFAULT_TUI_SESSION_KEY = "butler-tui";
 const TUI_JOB_POLL_INTERVAL_MS = 1200;
 const DEFAULT_EXEC_MODE = resolveDefaultExecMode();
+const DEFAULT_UP_RUNTIME = resolveDefaultUpRuntime();
+const DEFAULT_UP_LOCK_FILE = ".data/runtime/butler-up.lock";
+const DEFAULT_UP_STATUS_FILE = ".data/runtime/up-status.json";
 
 export async function runButlerCli(options = {}) {
   const cliName = options.cliName ?? "butler";
@@ -119,17 +126,24 @@ export async function runButlerCli(options = {}) {
     .command("up")
     .description("Run orchestrator + worker + gateway together")
     .option("--mode <mode>", "worker mode: mock|embedded", DEFAULT_EXEC_MODE)
+    .option("--runtime <runtime>", "service runtime: start|dev", DEFAULT_UP_RUNTIME)
+    .option("--lock-file <path>", "single-instance lock file path", DEFAULT_UP_LOCK_FILE)
+    .option("--status-file <path>", "supervisor status file path", DEFAULT_UP_STATUS_FILE)
     .option("--no-orchestrator", "do not start orchestrator")
     .option("--no-worker", "do not start worker")
     .option("--no-gateway", "do not start telegram gateway")
     .action(async (cmdOptions) => {
       const mode = parseMode(cmdOptions.mode);
+      const runtime = parseRuntime(cmdOptions.runtime);
+      const lockPath = resolve(process.cwd(), String(cmdOptions.lockFile ?? DEFAULT_UP_LOCK_FILE));
+      const statusPath = resolve(process.cwd(), String(cmdOptions.statusFile ?? DEFAULT_UP_STATUS_FILE));
       const includeOrchestrator = Boolean(cmdOptions.orchestrator);
       const includeWorker = Boolean(cmdOptions.worker);
       const includeGateway = Boolean(cmdOptions.gateway);
 
       const issues = runDoctor({
         mode,
+        runtime,
         includeGateway,
         includeWorker,
         includeOrchestrator,
@@ -145,72 +159,94 @@ export async function runButlerCli(options = {}) {
         return;
       }
 
-      const children = new Map();
+      const services = [];
+      const serviceScript = runtime;
 
       if (includeOrchestrator) {
-        children.set(
-          "orchestrator",
-          spawnService("orchestrator", ["--workspace", "apps/orchestrator", "run", "dev"], process.env)
-        );
+        const env = { ...process.env, BUTLER_UP_STATUS_FILE: statusPath };
+        services.push({
+          name: "orchestrator",
+          npmArgs: ["--workspace", "apps/orchestrator", "run", serviceScript],
+          env
+        });
       }
 
       if (includeWorker) {
         const env = buildWorkerEnv({
           ...process.env,
+          BUTLER_UP_STATUS_FILE: statusPath,
           PI_EXEC_MODE: mode
         });
 
-        children.set("worker", spawnService("worker", ["--workspace", "apps/vm-worker", "run", "dev"], env));
+        services.push({
+          name: "worker",
+          npmArgs: ["--workspace", "apps/vm-worker", "run", serviceScript],
+          env
+        });
       }
 
       if (includeGateway) {
-        children.set("gateway", spawnService("gateway", ["--workspace", "apps/telegram-gateway", "run", "dev"], process.env));
+        const env = { ...process.env, BUTLER_UP_STATUS_FILE: statusPath };
+        services.push({
+          name: "gateway",
+          npmArgs: ["--workspace", "apps/telegram-gateway", "run", serviceScript],
+          env
+        });
       }
 
-      if (children.size === 0) {
+      if (services.length === 0) {
         console.error("No services selected. Use defaults or pass --orchestrator/--worker/--gateway.");
         process.exit(1);
         return;
       }
 
-      console.log(`${cliName} up: started ${Array.from(children.keys()).join(", ")} (worker mode=${mode})`);
+      console.log(
+        `${cliName} up: supervising ${services.map((service) => service.name).join(", ")} ` +
+          `(worker mode=${mode}, runtime=${runtime})`
+      );
+      assertUpOwnerAllowed(process.env);
+      const lock = acquireUpLock(lockPath);
+      try {
+        await superviseServices(cliName, services, {
+          runtime,
+          workerMode: mode,
+          statusPath
+        });
+      } finally {
+        lock.release();
+      }
+    });
 
-      let shuttingDown = false;
-
-      const shutdown = (signal) => {
-        if (shuttingDown) return;
-        shuttingDown = true;
-        console.log(`${cliName} up: shutting down (${signal})`);
-        for (const child of children.values()) {
-          child.kill("SIGTERM");
-        }
-        setTimeout(() => {
-          for (const child of children.values()) {
-            if (!child.killed) {
-              child.kill("SIGKILL");
-            }
-          }
-        }, 2500);
-      };
-
-      for (const signal of ["SIGINT", "SIGTERM"]) {
-        process.on(signal, () => shutdown(signal));
+  program
+    .command("up-status")
+    .description("Read supervisor status written by 'butler up'")
+    .option("--status-file <path>", "supervisor status file path", DEFAULT_UP_STATUS_FILE)
+    .option("--json", "print raw JSON")
+    .action((cmdOptions) => {
+      const statusPath = resolve(process.cwd(), String(cmdOptions.statusFile ?? DEFAULT_UP_STATUS_FILE));
+      let status;
+      try {
+        status = readUpStatus(statusPath);
+      } catch {
+        console.error(`up-status: no status file at ${statusPath}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
       }
 
-      await new Promise((resolvePromise) => {
-        for (const [service, child] of children.entries()) {
-          child.on("exit", (code, signal) => {
-            console.log(`${cliName} up: ${service} exited (code=${code ?? "null"}, signal=${signal ?? "null"})`);
-            children.delete(service);
-            if (!shuttingDown && children.size > 0) {
-              shutdown(`${service}-exit`);
-            }
-            if (children.size === 0) {
-              resolvePromise();
-            }
-          });
-        }
-      });
+      console.log(
+        `supervisor=${status.supervisor.status} pid=${status.supervisor.pid} runtime=${status.supervisor.runtime} ` +
+          `workerMode=${status.supervisor.workerMode}`
+      );
+      for (const [name, service] of Object.entries(status.services ?? {})) {
+        const pid = service?.pid ? ` pid=${service.pid}` : "";
+        const restartCount = Number.isFinite(service?.restartCount) ? service.restartCount : 0;
+        const nextRestart = service?.nextRestartAt ? ` nextRestartAt=${service.nextRestartAt}` : "";
+        console.log(`${name}: ${service?.status ?? "unknown"} restarts=${restartCount}${pid}${nextRestart}`);
+      }
     });
 
   program
@@ -2313,6 +2349,148 @@ function spawnService(name, npmArgs, env) {
   return child;
 }
 
+async function superviseServices(cliName, services, options) {
+  const status = createUpStatusStore(options.statusPath, {
+    runtime: options.runtime,
+    workerMode: options.workerMode,
+    services: services.map((service) => service.name)
+  });
+  const publishStatus = createServiceStatusPublisher();
+  const publishCurrentStatus = () => publishStatus(status.snapshot());
+  await publishCurrentStatus();
+  const states = new Map();
+  let shuttingDown = false;
+  let resolveDone;
+  const done = new Promise((resolve) => {
+    resolveDone = resolve;
+  });
+
+  const tryResolveDone = () => {
+    if (states.size === 0) {
+      resolveDone();
+    }
+  };
+
+  const startService = (service, reason) => {
+    if (shuttingDown) {
+      return;
+    }
+
+    const state = states.get(service.name) ?? {
+      ...service,
+      child: undefined,
+      restartCount: 0,
+      restartTimer: undefined,
+      startedAtMs: Date.now()
+    };
+    state.startedAtMs = Date.now();
+    if (reason) {
+      console.log(`${cliName} up: starting ${service.name} (${reason})`);
+    }
+    status.markServiceStarting(service.name);
+    void publishCurrentStatus();
+    state.child = spawnService(service.name, service.npmArgs, service.env);
+    status.markServiceRunning(service.name, state.child.pid ?? null);
+    void publishCurrentStatus();
+    states.set(service.name, state);
+
+    state.child.on("exit", (code, signal) => {
+      const latest = states.get(service.name);
+      if (!latest) {
+        return;
+      }
+
+      latest.child = undefined;
+      console.log(`${cliName} up: ${service.name} exited (code=${code ?? "null"}, signal=${signal ?? "null"})`);
+      status.markServiceExited(service.name, code ?? null, signal ?? null);
+      void publishCurrentStatus();
+
+      if (shuttingDown) {
+        states.delete(service.name);
+        tryResolveDone();
+        return;
+      }
+
+      latest.restartCount += 1;
+      const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(6, latest.restartCount - 1));
+      console.log(`${cliName} up: restarting ${service.name} in ${delayMs}ms`);
+      status.markServiceRestartScheduled(service.name, latest.restartCount, delayMs);
+      void publishCurrentStatus();
+      latest.restartTimer = setTimeout(() => {
+        latest.restartTimer = undefined;
+        startService(service, "restart");
+      }, delayMs);
+    });
+  };
+
+  const shutdown = (signal) => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    status.setSupervisorStatus("stopping");
+    void publishCurrentStatus();
+    console.log(`${cliName} up: shutting down (${signal})`);
+
+    for (const state of states.values()) {
+      if (state.restartTimer) {
+        clearTimeout(state.restartTimer);
+        state.restartTimer = undefined;
+      }
+      if (state.child) {
+        state.child.kill("SIGTERM");
+      } else {
+        states.delete(state.name);
+      }
+    }
+
+    setTimeout(() => {
+      for (const state of states.values()) {
+        if (state.child && !state.child.killed) {
+          state.child.kill("SIGKILL");
+        }
+      }
+    }, 2500);
+
+    tryResolveDone();
+  };
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => shutdown(signal));
+  }
+
+  for (const service of services) {
+    startService(service, "initial");
+  }
+
+  await done;
+  status.setSupervisorStatus("stopped");
+  await publishCurrentStatus();
+}
+
+function createServiceStatusPublisher() {
+  const baseUrl = String(process.env.ORCH_BASE_URL ?? "").trim();
+  const workerToken = String(process.env.ORCH_WORKER_TOKEN ?? "").trim();
+  if (!baseUrl || !workerToken) {
+    return async () => {};
+  }
+
+  return async (services) => {
+    try {
+      await fetch(`${baseUrl}/v1/admin/services/state`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": workerToken
+        },
+        body: JSON.stringify({ services })
+      });
+    } catch {
+      // best-effort status publication; runtime must continue if control-plane push fails
+    }
+  };
+}
+
 function pipeWithPrefix(name, input, output) {
   const rl = readline.createInterface({ input });
   rl.on("line", (line) => {
@@ -2337,6 +2515,23 @@ function parseMode(raw) {
     return raw;
   }
   throw new Error(`Invalid mode '${raw}'. Expected 'mock' or 'embedded'.`);
+}
+
+function resolveDefaultUpRuntime() {
+  const explicit = String(process.env.BUTLER_UP_RUNTIME ?? "")
+    .trim()
+    .toLowerCase();
+  if (explicit === "start" || explicit === "dev") {
+    return explicit;
+  }
+  return "start";
+}
+
+function parseRuntime(raw) {
+  if (raw === "start" || raw === "dev") {
+    return raw;
+  }
+  throw new Error(`Invalid runtime '${raw}'. Expected 'start' or 'dev'.`);
 }
 
 function parseTuiJobKind(raw) {
@@ -2375,7 +2570,44 @@ function runDoctor(input) {
     }
   }
 
+  if (input.runtime === "start") {
+    if (input.includeOrchestrator) {
+      pushBuildIssue(
+        issues,
+        "orchestrator",
+        "apps/orchestrator/dist/index.js",
+        "apps/orchestrator/src/index.ts"
+      );
+    }
+    if (input.includeWorker) {
+      pushBuildIssue(issues, "worker", "apps/vm-worker/dist/index.js", "apps/vm-worker/src/index.ts");
+    }
+    if (input.includeGateway) {
+      pushBuildIssue(
+        issues,
+        "gateway",
+        "apps/telegram-gateway/dist/index.js",
+        "apps/telegram-gateway/src/index.ts"
+      );
+    }
+  }
+
   return issues;
+}
+
+function pushBuildIssue(issues, serviceName, artifactLabel, sourceLabel) {
+  const artifactPath = resolve(process.cwd(), artifactLabel);
+  const sourcePath = resolve(process.cwd(), sourceLabel);
+  const issue = getBuildArtifactIssue({
+    serviceName,
+    artifactLabel,
+    sourceLabel,
+    artifactPath,
+    sourcePath
+  });
+  if (issue) {
+    issues.push(issue);
+  }
 }
 
 function validateSetupValues(values) {
