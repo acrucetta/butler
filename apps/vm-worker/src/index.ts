@@ -335,9 +335,10 @@ async function runJob(job: Job): Promise<void> {
       return;
     }
 
-    // If the agent responded with __SILENT__, complete the job without
-    // forwarding any text to the user (prevents literal "__SILENT__" in Telegram).
-    const isSilent = finalResult.trim() === "__SILENT__";
+    // Only honour __SILENT__ for proactive/scheduled jobs. Direct user
+    // messages must always produce a visible reply.
+    const isProactiveJob = job.sessionKey?.startsWith("proactive:");
+    const isSilent = isProactiveJob && finalResult.trim() === "__SILENT__";
     await orchestrator.complete(job.id, isSilent ? "" : finalResult);
     console.log(`[worker] job complete job=${job.id}${isSilent ? " (silent)" : ""}`);
   } catch (error) {
