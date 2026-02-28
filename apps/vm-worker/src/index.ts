@@ -572,9 +572,10 @@ function buildSystemPromptContext(workspaceRoot: string, skillsContext: string):
     // ── Silent Replies ───────────────────────────────────────────────────
     [
       "## Silent Replies",
-      "When you have nothing to say, respond with ONLY: __SILENT__",
+      "When a PROACTIVE or SCHEDULED task has nothing to report, respond with ONLY: __SILENT__",
       "It must be your ENTIRE message — nothing else.",
       "Never append it to an actual response.",
+      "NEVER use __SILENT__ when replying to a direct user message — always respond to the user, even with a brief acknowledgment.",
     ].join("\n"),
 
     // ── Memory Recall ─────────────────────────────────────────────────────
