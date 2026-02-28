@@ -1018,9 +1018,16 @@ async function sendTerminalJobMessage(chatId: string, threadId: string | undefin
   if (job.status === "completed") {
     const result = job.resultText?.trim() || "";
 
-    // Silent reply — agent explicitly chose not to respond. Skip Telegram message entirely.
-    if (!result || result === "__SILENT__") {
-      console.log(`[gateway] silent reply for job=${job.id}, skipping Telegram message`);
+    // Only suppress empty/__SILENT__ replies for proactive/scheduled jobs.
+    // Direct user messages must always produce a visible reply.
+    const isProactiveJob = job.sessionKey?.startsWith("proactive:");
+    if (isProactiveJob && (!result || result === "__SILENT__")) {
+      console.log(`[gateway] silent reply for proactive job=${job.id}, skipping Telegram message`);
+      return;
+    }
+    if (!isProactiveJob && !result) {
+      // Direct message with truly empty result — send a fallback so the user isn't left hanging
+      await sendThreadMessage(chatId, threadId, "Done (no output).");
       return;
     }
 
