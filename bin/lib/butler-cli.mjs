@@ -2336,11 +2336,14 @@ function promptForSkillMultiSelect({ title, skills, initialSelected }) {
 }
 
 function spawnService(name, npmArgs, env) {
-  const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawn(npmBin, npmArgs, {
+  const isWindows = process.platform === "win32";
+  const child = spawn("npm", npmArgs, {
     cwd: process.cwd(),
     env,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    // Windows requires shell:true for .cmd resolution; POSIX omits it
+    // so SIGTERM reaches the child directly instead of hitting a shell wrapper
+    ...(isWindows ? { shell: true } : {})
   });
 
   pipeWithPrefix(name, child.stdout, process.stdout);
