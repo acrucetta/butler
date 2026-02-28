@@ -1,8 +1,10 @@
 import type { Job } from "@pi-self/contracts";
 import { isTerminalStatus } from "@pi-self/contracts";
 import { Bot } from "grammy";
+import { loadGatewayConfig } from "./gateway-config.js";
 import { OrchestratorClient } from "./orchestrator-client.js";
 import { PairingStore } from "./pairing-store.js";
+import { computePollingRetryDelayMs, isTelegramPollingConflictError } from "./polling-retry.js";
 import { SessionStore } from "./session-store.js";
 import { toTelegramMarkdownV2 } from "./telegram-markdown.js";
 import { startTypingIndicator } from "./typing-indicator.js";
@@ -46,44 +48,43 @@ class SlidingWindowRateLimiter {
   }
 }
 
-const botToken = requireEnv("TELEGRAM_BOT_TOKEN", process.env.TELEGRAM_BOT_TOKEN);
-const orchestratorBaseUrl = process.env.ORCH_BASE_URL ?? "http://127.0.0.1:8787";
-const gatewayToken = requireSecret("ORCH_GATEWAY_TOKEN", process.env.ORCH_GATEWAY_TOKEN);
-const jobPollMs = parsePositiveInt(process.env.TG_JOB_POLL_MS, 2_000);
-const promptMaxChars = parsePositiveInt(process.env.TG_PROMPT_MAX_CHARS, 8_000);
-const rateLimitPerMinute = parsePositiveInt(process.env.TG_RATE_LIMIT_PER_MIN, 12);
-const runOwnerOnly = parseBoolean(process.env.TG_RUN_OWNER_ONLY, true);
-const approveOwnerOnly = parseBoolean(process.env.TG_APPROVE_OWNER_ONLY, true);
-const allowRequesterAbort = parseBoolean(process.env.TG_ALLOW_REQUESTER_ABORT, true);
-const notifyToolEvents = parseBoolean(process.env.TG_NOTIFY_TOOL_EVENTS, false);
-const onlyAgentOutput = parseBoolean(process.env.TG_ONLY_AGENT_OUTPUT, true);
-const agentMarkdownV2 = parseBoolean(process.env.TG_AGENT_MARKDOWNV2, true);
-const typingEnabled = parseBoolean(process.env.TG_TYPING_ENABLED, true);
-const typingHeartbeatMs = Math.max(1_000, parsePositiveInt(process.env.TG_TYPING_HEARTBEAT_MS, 4_000));
-const mediaEnabled = parseBoolean(process.env.TG_MEDIA_ENABLED, true);
-const mediaMaxFileMb = parsePositiveInt(process.env.TG_MEDIA_MAX_FILE_MB, 20);
-const mediaMaxFileBytes = mediaMaxFileMb * 1024 * 1024;
-const mediaVisionMaxFileMb = parsePositiveInt(process.env.TG_MEDIA_VISION_MAX_FILE_MB, 8);
-const mediaVisionMaxFileBytes = mediaVisionMaxFileMb * 1024 * 1024;
-const mediaTranscriptMaxChars = parsePositiveInt(process.env.TG_MEDIA_TRANSCRIPT_MAX_CHARS, 6_000);
-const mediaVisionMaxChars = parsePositiveInt(process.env.TG_MEDIA_VISION_MAX_CHARS, 4_000);
-const mediaSttModel = process.env.TG_MEDIA_STT_MODEL?.trim() || "gpt-4o-mini-transcribe";
-const mediaVisionModel = process.env.TG_MEDIA_VISION_MODEL?.trim() || "gpt-5-mini";
-const mediaOpenAiApiKey = process.env.OPENAI_API_KEY?.trim() || "";
-const mediaOpenAiBaseUrl = normalizeOpenAiBaseUrl(process.env.OPENAI_BASE_URL);
-const proactiveDeliveryPollMs = parsePositiveInt(process.env.TG_PROACTIVE_DELIVERY_POLL_MS, 3_000);
-const owners = splitCsv(process.env.TG_OWNER_IDS ?? "");
-const allowFrom = splitCsv(process.env.TG_ALLOW_FROM ?? "");
-const pairingsFile = process.env.TG_PAIRINGS_FILE ?? ".data/gateway/pairings.json";
-const sessionsFile = process.env.TG_SESSIONS_FILE ?? ".data/gateway/sessions.json";
-
-if (owners.length === 0) {
-  throw new Error("TG_OWNER_IDS must include at least one Telegram user ID");
-}
-
-if (mediaEnabled && !mediaOpenAiApiKey) {
-  throw new Error("TG_MEDIA_ENABLED=true requires OPENAI_API_KEY");
-}
+const config = loadGatewayConfig();
+const {
+  botToken,
+  orchestratorBaseUrl,
+  gatewayToken,
+  jobPollMs,
+  promptMaxChars,
+  rateLimitPerMinute,
+  runOwnerOnly,
+  approveOwnerOnly,
+  allowRequesterAbort,
+  notifyToolEvents,
+  onlyAgentOutput,
+  agentMarkdownV2,
+  typingEnabled,
+  typingHeartbeatMs,
+  mediaEnabled,
+  mediaMaxFileMb,
+  mediaMaxFileBytes,
+  mediaVisionMaxFileMb,
+  mediaVisionMaxFileBytes,
+  mediaTranscriptMaxChars,
+  mediaVisionMaxChars,
+  mediaSttModel,
+  mediaVisionModel,
+  mediaOpenAiApiKey,
+  mediaOpenAiBaseUrl,
+  proactiveDeliveryPollMs,
+  pollingRetryBaseMs,
+  pollingRetryMaxMs,
+  pollingConflictMaxRetries,
+  owners,
+  allowFrom,
+  gatewayDataPaths,
+  pairingsFile,
+  sessionsFile
+} = config;
 
 const bot = new Bot(botToken);
 const orchestrator = new OrchestratorClient(orchestratorBaseUrl, gatewayToken);
@@ -353,14 +354,64 @@ bot.catch((error) => {
   console.error("[gateway] bot error", error.error);
 });
 
-await bot.start({
-  onStart: (botInfo) => {
-    console.log(`[gateway] bot started @${botInfo.username}`);
-    console.log(`[gateway] owners=${owners.join(",")}`);
-  }
-});
+const shutdownController = new AbortController();
 
-void runProactiveDeliveryLoop();
+void runProactiveDeliveryLoop(shutdownController.signal);
+
+await startBotWithRetry();
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    console.log(`[gateway] received ${signal}, stopping…`);
+    shutdownController.abort();
+    const stopPromise = Promise.resolve(bot.stop()).catch((err) =>
+      console.warn(`[gateway] bot.stop() error: ${formatError(err)}`)
+    );
+    void stopPromise.finally(() => {
+      setTimeout(() => process.exit(0), 2_000);
+    });
+  });
+}
+
+async function startBotWithRetry(): Promise<void> {
+  let attempt = 0;
+  let conflictAttempts = 0;
+  for (;;) {
+    try {
+      await bot.start({
+        onStart: (botInfo) => {
+          console.log(`[gateway] bot started @${botInfo.username}`);
+          console.log(`[gateway] owners=${owners.join(",")}`);
+          console.log(`[gateway] workspace root=${gatewayDataPaths.workspaceRoot}`);
+          console.log(`[gateway] pairings file=${pairingsFile}`);
+          console.log(`[gateway] sessions file=${sessionsFile}`);
+        }
+      });
+      return;
+    } catch (error) {
+      attempt += 1;
+      const isConflict = isTelegramPollingConflictError(error);
+      if (isConflict) {
+        conflictAttempts += 1;
+      }
+      const delayMs = computePollingRetryDelayMs(attempt, pollingRetryBaseMs, pollingRetryMaxMs);
+      if (isConflict) {
+        console.warn(
+          `[gateway] polling conflict ${conflictAttempts}/${pollingConflictMaxRetries}; retrying in ${delayMs}ms`
+        );
+        if (conflictAttempts >= pollingConflictMaxRetries) {
+          console.error(
+            `[gateway] 409 conflict persisted after ${conflictAttempts} attempts, exiting for clean restart`
+          );
+          process.exit(78);
+        }
+      } else {
+        console.error(`[gateway] bot start failed: ${formatError(error)}; retrying in ${delayMs}ms`);
+      }
+      await sleep(delayMs);
+    }
+  }
+}
 
 async function handleUnpairedMessage(ctx: any, fromId: string): Promise<void> {
   if (ctx.chat.type !== "private") {
@@ -1091,13 +1142,6 @@ function renderSessionSummary(
     .join("\n");
 }
 
-function splitCsv(value: string): string[] {
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
 function helpText(): string {
   return [
     "Commands:",
@@ -1143,16 +1187,25 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-async function runProactiveDeliveryLoop(): Promise<void> {
-  for (;;) {
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+async function runProactiveDeliveryLoop(signal: AbortSignal): Promise<void> {
+  while (!signal.aborted) {
     try {
       const jobs = await orchestrator.listPendingProactiveDeliveries(20);
       if (jobs.length === 0) {
-        await sleep(proactiveDeliveryPollMs);
+        await abortableSleep(proactiveDeliveryPollMs, signal);
         continue;
       }
 
       for (const job of jobs) {
+        if (signal.aborted) break;
         try {
           const receipt = await deliverProactiveJob(job);
           await orchestrator.ackProactiveDelivery(job.id, receipt);
@@ -1161,10 +1214,12 @@ async function runProactiveDeliveryLoop(): Promise<void> {
         }
       }
     } catch (error) {
+      if (signal.aborted) break;
       console.warn(`[gateway] proactive delivery loop error: ${formatError(error)}`);
-      await sleep(proactiveDeliveryPollMs);
+      await abortableSleep(proactiveDeliveryPollMs, signal);
     }
   }
+  console.log("[gateway] proactive delivery loop stopped");
 }
 
 async function deliverProactiveJob(job: Job): Promise<string> {
@@ -1211,14 +1266,6 @@ async function deliverProactiveJob(job: Job): Promise<string> {
   throw new Error(`unsupported proactive delivery mode '${mode}'`);
 }
 
-function normalizeOpenAiBaseUrl(raw: string | undefined): string {
-  const value = raw?.trim();
-  if (!value) {
-    return "https://api.openai.com/v1";
-  }
-  return value.replace(/\/+$/g, "");
-}
-
 async function readErrorBody(response: Response): Promise<string> {
   const text = (await response.text()).trim();
   if (!text) {
@@ -1263,38 +1310,4 @@ function isRecoverableImageParseError(error: unknown): boolean {
 function isTelegramEntityParseError(error: unknown): boolean {
   const text = formatError(error).toLowerCase();
   return text.includes("can't parse entities") || text.includes("parse entities");
-}
-
-function requireEnv(name: string, value: string | undefined): string {
-  if (!value) {
-    throw new Error(`Missing required environment variable ${name}`);
-  }
-  return value;
-}
-
-function requireSecret(name: string, value: string | undefined): string {
-  if (!value) {
-    throw new Error(`Missing required secret ${name}`);
-  }
-  if (value.length < 16) {
-    throw new Error(`${name} must be at least 16 characters`);
-  }
-  return value;
-}
-
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return Math.floor(parsed);
-}
-
-function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
-  if (!raw) return fallback;
-  const normalized = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(normalized)) return true;
-  if (["0", "false", "no", "off"].includes(normalized)) return false;
-  return fallback;
 }

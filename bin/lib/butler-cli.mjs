@@ -2336,11 +2336,11 @@ function promptForSkillMultiSelect({ title, skills, initialSelected }) {
 }
 
 function spawnService(name, npmArgs, env) {
-  const child = spawn("npm", npmArgs, {
+  const npmBin = process.platform === "win32" ? "npm.cmd" : "npm";
+  const child = spawn(npmBin, npmArgs, {
     cwd: process.cwd(),
     env,
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: true
+    stdio: ["ignore", "pipe", "pipe"]
   });
 
   pipeWithPrefix(name, child.stdout, process.stdout);
