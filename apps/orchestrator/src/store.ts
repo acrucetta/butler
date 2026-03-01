@@ -11,6 +11,7 @@ interface PersistedState {
   pauseReason?: string;
   pauseUpdatedAt: string;
   serviceStatus?: unknown;
+  proactiveLastDelivered: Record<string, { text: string; ts: string }>;
 }
 
 const initialState: PersistedState = {
@@ -19,10 +20,12 @@ const initialState: PersistedState = {
   queue: [],
   paused: false,
   pauseUpdatedAt: nowIso(),
-  serviceStatus: undefined
+  serviceStatus: undefined,
+  proactiveLastDelivered: {}
 };
 
 const MAX_EVENTS_PER_JOB = 5_000;
+const DEDUP_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -364,6 +367,12 @@ export class OrchestratorStore {
         continue;
       }
 
+      // Heartbeat dedup: suppress if identical to last delivered text within TTL
+      if (this.isDuplicateHeartbeat(job)) {
+        this.autoAckDuplicate(job);
+        continue;
+      }
+
       out.push(structuredClone(job));
       if (out.length >= capped) {
         break;
@@ -383,6 +392,16 @@ export class OrchestratorStore {
     metadata.proactiveDeliveryReceipt = receipt.slice(0, 2_000);
     job.metadata = metadata;
     job.updatedAt = nowIso();
+
+    // Track last delivered text for heartbeat dedup
+    const triggerKey = metadata.proactiveTriggerKey;
+    if (typeof triggerKey === "string" && job.resultText) {
+      this.state.proactiveLastDelivered[triggerKey] = {
+        text: job.resultText.trim(),
+        ts: nowIso()
+      };
+    }
+
     this.save();
     return structuredClone(job);
   }
@@ -474,7 +493,8 @@ export class OrchestratorStore {
         paused: parsed.paused ?? false,
         pauseReason: parsed.pauseReason,
         pauseUpdatedAt: parsed.pauseUpdatedAt ?? nowIso(),
-        serviceStatus: parsed.serviceStatus
+        serviceStatus: parsed.serviceStatus,
+        proactiveLastDelivered: parsed.proactiveLastDelivered ?? {}
       };
     } catch {
       return cloneState(initialState);
@@ -485,6 +505,46 @@ export class OrchestratorStore {
     const tempPath = `${this.filePath}.tmp`;
     writeFileSync(tempPath, JSON.stringify(this.state, null, 2), "utf8");
     renameSync(tempPath, this.filePath);
+  }
+
+  clearLastDelivered(triggerKey?: string): number {
+    if (triggerKey) {
+      const had = triggerKey in this.state.proactiveLastDelivered ? 1 : 0;
+      delete this.state.proactiveLastDelivered[triggerKey];
+      this.save();
+      return had;
+    }
+    const count = Object.keys(this.state.proactiveLastDelivered).length;
+    this.state.proactiveLastDelivered = {};
+    this.save();
+    return count;
+  }
+
+  private isDuplicateHeartbeat(job: Job): boolean {
+    if (job.metadata?.proactiveTriggerKind !== "heartbeat") return false;
+
+    const triggerKey = job.metadata?.proactiveTriggerKey;
+    if (typeof triggerKey !== "string") return false;
+
+    const last = this.state.proactiveLastDelivered[triggerKey];
+    if (!last) return false;
+
+    const age = Date.now() - Date.parse(last.ts);
+    if (age > DEDUP_TTL_MS) return false;
+
+    const currentText = (job.resultText ?? "").trim();
+    return currentText === last.text;
+  }
+
+  private autoAckDuplicate(job: Job): void {
+    const ts = nowIso();
+    const metadata = { ...(job.metadata ?? {}) };
+    metadata.proactiveDeliveredAt = ts;
+    metadata.proactiveDeliveryReceipt = `duplicate-suppressed:${ts}`;
+    job.metadata = metadata;
+    job.updatedAt = ts;
+    console.log(`[dedup] suppressed duplicate heartbeat delivery for job ${job.id} (trigger: ${metadata.proactiveTriggerKey})`);
+    this.save();
   }
 
   private skipDuplicateIdempotentJob(job: Job): boolean {
