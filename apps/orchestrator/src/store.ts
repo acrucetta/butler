@@ -26,6 +26,42 @@ const initialState: PersistedState = {
 
 const MAX_EVENTS_PER_JOB = 5_000;
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1_000; // 24 hours
+const DEDUP_SIMILARITY_THRESHOLD = 0.85; // 85% word overlap = "same message"
+
+/** Normalize text for comparison: strip markdown formatting and collapse whitespace. */
+function normalizeForDedup(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/gm, "")      // strip heading markers
+    .replace(/^[-*]\s*\[[ x]]\s*/gm, "") // strip checkbox bullets
+    .replace(/^[-*+]\s+/gm, "")       // strip plain bullets
+    .replace(/[*_~`]/g, "")           // strip emphasis/code markers
+    .replace(/\s+/g, " ")            // collapse whitespace
+    .trim()
+    .toLowerCase();
+}
+
+/** Word-overlap similarity ratio (Jaccard-like on word multisets). */
+function textSimilarity(a: string, b: string): number {
+  const wordsA = normalizeForDedup(a).split(" ").filter(Boolean);
+  const wordsB = normalizeForDedup(b).split(" ").filter(Boolean);
+  if (wordsA.length === 0 && wordsB.length === 0) return 1;
+  if (wordsA.length === 0 || wordsB.length === 0) return 0;
+
+  const bagB = new Map<string, number>();
+  for (const w of wordsB) bagB.set(w, (bagB.get(w) ?? 0) + 1);
+
+  let shared = 0;
+  for (const w of wordsA) {
+    const count = bagB.get(w) ?? 0;
+    if (count > 0) {
+      shared++;
+      bagB.set(w, count - 1);
+    }
+  }
+
+  // ratio of shared words to the larger set size
+  return shared / Math.max(wordsA.length, wordsB.length);
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -533,7 +569,12 @@ export class OrchestratorStore {
     if (age > DEDUP_TTL_MS) return false;
 
     const currentText = (job.resultText ?? "").trim();
-    return currentText === last.text;
+    const similarity = textSimilarity(currentText, last.text);
+    if (similarity >= DEDUP_SIMILARITY_THRESHOLD) {
+      console.log(`[dedup] similarity=${(similarity * 100).toFixed(1)}% (threshold=${DEDUP_SIMILARITY_THRESHOLD * 100}%) for trigger=${triggerKey}`);
+      return true;
+    }
+    return false;
   }
 
   private autoAckDuplicate(job: Job): void {
