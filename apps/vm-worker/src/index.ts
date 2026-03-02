@@ -296,9 +296,23 @@ async function runJob(job: Job): Promise<void> {
           }
         });
 
-        modelRouting.markSuccess(profile.id);
         await flushDelta();
         finalResult = result.trim().length > 0 ? result : fullText;
+
+        if (finalResult.trim().length === 0 && !attemptHadOutput && !attemptHadToolActivity) {
+          // The model returned nothing and did nothing — likely an upstream error
+          // (e.g. rate limit, key limit, provider outage) that the SDK swallowed.
+          const warnMsg = "Warning: model returned empty response with no tool activity — possible upstream API error (check provider key limits/credits)";
+          await postEvent(job.id, "log", warnMsg);
+          console.warn(`[worker] ${warnMsg} job=${job.id} profile=${profile.id}`);
+
+          const hasNextAttempt = attempt + 1 < plan.maxAttempts;
+          if (hasNextAttempt) {
+            continue; // try next model attempt
+          }
+        }
+
+        modelRouting.markSuccess(profile.id);
         completed = true;
         break;
       } catch (error) {

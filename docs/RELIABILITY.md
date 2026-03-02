@@ -27,6 +27,7 @@
 - Use `/panic on` before risky maintenance.
 - Restart only affected service first, then run `/status` for control-plane health or `/status <jobId>` for a specific job.
 - If state persistence is suspected, inspect `.data/orchestrator/state.json` and events.
-- To enforce single-owner startup, set `BUTLER_UP_OWNER_REQUIRED` (for example `schtasks`) and ensure the service launcher exports matching `BUTLER_UP_OWNER`.
+- To enforce single-owner startup, set `BUTLER_UP_OWNER_REQUIRED` (for example `andres-mini`). `butler up` now falls back to machine hostname when `BUTLER_UP_OWNER` is unset.
+- If gateway logs show Telegram polling conflict (`getUpdates` 409), another bot process is using the same token. Stop the duplicate process; gateway now retries with backoff instead of hard-crashing.
 - Keep stale-job recovery enabled (default): `ORCH_STALE_JOB_REAPER_ENABLED=true`.
 - Tune recovery windows as needed: `ORCH_STALE_JOB_IDLE_MS` (default `300000`) and `ORCH_STALE_JOB_REAPER_TICK_MS` (default `30000`).

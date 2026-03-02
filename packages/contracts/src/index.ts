@@ -14,10 +14,13 @@ export const JobStatusSchema = z.enum([
 ]);
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 
+export const ChannelSchema = z.enum(["telegram", "tui", "api"]);
+export type Channel = z.infer<typeof ChannelSchema>;
+
 export const JobCreateRequestSchema = z.object({
   kind: JobKindSchema.default("task"),
   prompt: z.string().min(1).max(20_000),
-  channel: z.literal("telegram"),
+  channel: ChannelSchema,
   chatId: z.string().min(1).max(128),
   threadId: z.string().min(1).max(128).optional(),
   requesterId: z.string().min(1).max(128),
@@ -54,7 +57,7 @@ export const JobSchema = z.object({
   kind: JobKindSchema,
   status: JobStatusSchema,
   prompt: z.string().max(20_000),
-  channel: z.literal("telegram"),
+  channel: ChannelSchema,
   chatId: z.string().min(1).max(128),
   threadId: z.string().min(1).max(128).optional(),
   requesterId: z.string().min(1).max(128),

@@ -137,7 +137,9 @@ OPENAI_API_KEY=<openai-api-key>
 # TG_MEDIA_VISION_MAX_FILE_MB=8
 # TG_MEDIA_TRANSCRIPT_MAX_CHARS=6000
 # TG_MEDIA_VISION_MAX_CHARS=4000
-# optional: override session context store path
+# optional: override pairing/session store paths
+# relative paths resolve from gateway process cwd
+TG_PAIRINGS_FILE=.data/gateway/pairings.json
 TG_SESSIONS_FILE=.data/gateway/sessions.json
 # optional: only send final agent text in Telegram (default true)
 TG_ONLY_AGENT_OUTPUT=true
@@ -155,6 +157,10 @@ PI_MODEL=moonshotai/kimi-k2.5
 # PI_WORKSPACE=<repo-root>
 # PI_SESSION_ROOT=<repo-root>/.data/worker/sessions
 ```
+
+By default, gateway data files now resolve to repo-root `.data/gateway/*`.
+If only legacy files exist at `apps/telegram-gateway/.data/gateway/*`, Butler
+migrates them once to repo-root on startup.
 
 When `TG_AGENT_MARKDOWNV2=true`, prefer Telegram entities over standard Markdown:
 - bold: `*bold*`
@@ -189,6 +195,14 @@ Butler auto-picks execution mode:
 npm run butler -- up --mode embedded
 npm run butler -- up --mode mock
 ```
+
+Recommended for production-style runs on a dedicated host:
+
+```bash
+export BUTLER_UP_OWNER_REQUIRED=andres-mini
+```
+
+`butler up` enforces this owner check and falls back to machine hostname when `BUTLER_UP_OWNER` is unset, which helps prevent accidental multi-host startup with the same Telegram token.
 
 ## Butler TUI (Minimal Command Bar)
 

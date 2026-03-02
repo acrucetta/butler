@@ -704,7 +704,8 @@ async function runButlerTui({ initialJobKind, chatId, requesterId, sessionKey, t
       status: String(job.status ?? "queued"),
       cursor: 0,
       resultText: String(job.resultText ?? ""),
-      error: String(job.error ?? "")
+      error: String(job.error ?? ""),
+      streamStarted: false
     };
     setActiveJob(active);
     printStatusLine(`[${formatTuiClock()}] created ${active.id} (${active.status})`);
@@ -762,8 +763,27 @@ async function runButlerTui({ initialJobKind, chatId, requesterId, sessionKey, t
       if (Number.isFinite(nextCursor) && nextCursor >= 0) {
         current.cursor = Math.floor(nextCursor);
       }
+
+      // Stream events in real-time
       for (const event of events) {
-        current.resultText += extractAgentDelta(event);
+        const type = event?.type;
+        if (type === "agent_text_delta") {
+          const delta = extractAgentDelta(event);
+          if (delta) {
+            if (!current.streamStarted) {
+              process.stdout.write("\n");
+              current.streamStarted = true;
+            }
+            process.stdout.write(delta);
+          }
+          current.resultText += delta;
+        } else if (type === "tool_start") {
+          const toolName = event?.data?.tool ?? "unknown";
+          process.stdout.write(`\n  ⏳ ${toolName}…`);
+        } else if (type === "tool_end") {
+          const toolName = event?.data?.tool ?? "unknown";
+          process.stdout.write(` ✓ ${toolName}\n`);
+        }
       }
 
       const latest = await tuiGetJob(remoteContext, current.id);
@@ -772,7 +792,7 @@ async function runButlerTui({ initialJobKind, chatId, requesterId, sessionKey, t
       current.resultText = String(latest.resultText ?? current.resultText ?? "");
       current.error = String(latest.error ?? current.error ?? "");
 
-      if (current.status !== previousStatus) {
+      if (current.status !== previousStatus && !isTerminalJobStatus(current.status)) {
         printStatusLine(`[${formatTuiClock()}] ${current.id} -> ${current.status}`);
         renderPrompt();
       }
@@ -781,7 +801,10 @@ async function runButlerTui({ initialJobKind, chatId, requesterId, sessionKey, t
         stopPolling();
         state.lastJob = { ...current };
         setActiveJob(null);
-        if (current.resultText.trim()) {
+        if (current.streamStarted) {
+          // We already streamed the output; just print a separator
+          process.stdout.write("\n───────────────────────────────────\n");
+        } else if (current.resultText.trim()) {
           printStatusLine(`result:\n${current.resultText.trim()}`);
         } else if (current.error.trim()) {
           printStatusLine(`error: ${current.error.trim()}`);
@@ -952,7 +975,7 @@ async function tuiCreateJob(remoteContext, input) {
   const payload = {
     kind: input.kind,
     prompt: String(input.prompt ?? ""),
-    channel: "telegram",
+    channel: "tui",
     chatId: remoteContext.chatId,
     requesterId: remoteContext.requesterId,
     sessionKey: remoteContext.sessionKey,
