@@ -121,6 +121,7 @@ export type AdminState = z.infer<typeof AdminStateSchema>;
 
 export const ProactiveTargetSchema = z.object({
   kind: JobKindSchema.default("task"),
+  channel: ChannelSchema.default("telegram"),
   chatId: z.string().min(1).max(128),
   threadId: z.string().min(1).max(128).optional(),
   requesterId: z.string().min(1).max(128),
@@ -217,4 +218,36 @@ export const jobTerminalStates: JobStatus[] = ["aborted", "completed", "failed"]
 
 export function isTerminalStatus(status: JobStatus): boolean {
   return jobTerminalStates.includes(status);
+}
+
+// ── Channel integration contracts ────────────────────────────────────────────
+// Pure TypeScript interfaces (no Zod, no runtime cost) that formalize what
+// any channel gateway or delivery sink must implement.
+
+/** What any channel gateway must implement to interact with the orchestrator. */
+export interface ChannelGatewayInterface {
+  /** Submit a new job to the orchestrator on behalf of a user message. */
+  createJob(request: JobCreateRequest): Promise<Job>;
+  /** Acknowledge delivery of a completed proactive job. */
+  ackProactiveDelivery(jobId: string, receipt: string): Promise<Job>;
+  /** Deliver a completed job result to the channel. */
+  deliverResult(job: Job, message: string): Promise<void>;
+}
+
+/** What a delivery sink must implement to send a job result to users. */
+export interface DeliveryAdapterInterface {
+  /** Deliver a job's result message to the destination identified by the job. */
+  deliver(job: Job, message: string): Promise<void>;
+}
+
+/** Normalized proactive job target — always includes channel for routing. */
+export interface ProactiveTargetInterface {
+  kind: JobKind;
+  channel: Channel;
+  chatId: string;
+  threadId?: string;
+  requesterId: string;
+  sessionKey: string;
+  requiresApproval: boolean;
+  metadata?: Record<string, string>;
 }

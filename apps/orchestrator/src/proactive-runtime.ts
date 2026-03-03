@@ -480,7 +480,7 @@ export class ProactiveRuntime {
     const request: JobCreateRequest = {
       kind: target.kind as JobKind,
       prompt: safePrompt,
-      channel: "telegram",
+      channel: target.channel,
       chatId: target.chatId,
       threadId: target.threadId,
       requesterId: target.requesterId,
