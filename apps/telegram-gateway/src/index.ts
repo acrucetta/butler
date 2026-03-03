@@ -65,6 +65,7 @@ const jobTracker = createJobTracker({
 });
 
 const commandRouter = createCommandRouter({
+  channel: "telegram",
   pairings,
   sessions,
   orchestrator,

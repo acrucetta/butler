@@ -1,5 +1,5 @@
 import type { Bot } from "grammy";
-import { formatError } from "./gateway-utils.js";
+import { formatError, parseSender } from "./gateway-utils.js";
 import type { PairingStore } from "./pairing-store.js";
 
 interface ChatCompletionsResponse {
@@ -43,7 +43,7 @@ export function registerMediaHandlers(bot: Bot, cfg: MediaHandlerConfig, deps: M
 
   bot.on("message:photo", async (ctx) => {
     try {
-      const fromId = String(ctx.from?.id ?? "");
+      const fromId = parseSender(ctx);
       if (!fromId) {
         return;
       }

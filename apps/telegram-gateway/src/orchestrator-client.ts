@@ -8,6 +8,7 @@ import {
   type JobCreateRequest,
   type JobEventsResponse
 } from "@pi-self/contracts";
+import { sleep } from "./gateway-utils.js";
 
 export class OrchestratorClient {
   private readonly requestTimeoutMs: number;
@@ -170,9 +171,3 @@ function isRetryableNetworkError(error: unknown): boolean {
   );
 }
 
-function sleep(ms: number): Promise<void> {
-  if (ms <= 0) {
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

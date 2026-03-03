@@ -1,12 +1,13 @@
-import type { Job } from "@pi-self/contracts";
+import type { Channel, Job } from "@pi-self/contracts";
 import { isTerminalStatus } from "@pi-self/contracts";
-import { formatError } from "./gateway-utils.js";
+import { compactLines, formatError, parseSender } from "./gateway-utils.js";
 import type { OrchestratorClient } from "./orchestrator-client.js";
 import type { PairingStore } from "./pairing-store.js";
 import type { SessionStore } from "./session-store.js";
 import type { TelegramMessageFormat } from "./job-tracker.js";
 
 export interface CommandRouterConfig {
+  channel: Channel;
   pairings: PairingStore;
   sessions: SessionStore;
   orchestrator: OrchestratorClient;
@@ -66,7 +67,7 @@ class SlidingWindowRateLimiter {
 
 export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
   const {
-    pairings, sessions, orchestrator, trackJob, sendThreadMessage, activeTrackers,
+    channel, pairings, sessions, orchestrator, trackJob, sendThreadMessage, activeTrackers,
     rateLimitPerMinute, runOwnerOnly, approveOwnerOnly, allowRequesterAbort, promptMaxChars, onlyAgentOutput
   } = cfg;
 
@@ -109,7 +110,7 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
     requiresApproval: boolean,
     metadata?: Record<string, string>
   ): Promise<void> {
-    const fromId = String(ctx.from?.id ?? "");
+    const fromId = parseSender(ctx) ?? "";
     const chatId = String(ctx.chat.id);
     const threadId = ctx.message.message_thread_id ? String(ctx.message.message_thread_id) : undefined;
     const session = sessions.touchSession(chatId, threadId);
@@ -119,7 +120,7 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
     const job = await orchestrator.createJob({
       kind,
       prompt,
-      channel: "telegram",
+      channel,
       chatId,
       threadId,
       requesterId: fromId,
@@ -131,14 +132,12 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
     if (requiresApproval) {
       await sendThreadMessage(chatId, threadId, `Pending approval. Use /approve ${job.id} to run it.`);
     } else if (!onlyAgentOutput) {
-      await sendThreadMessage(chatId, threadId, [
+      await sendThreadMessage(chatId, threadId, compactLines([
         `Job created: ${job.id}`,
         `status: ${job.status}`,
         admin.paused ? "Execution is paused (/panic on). Job will wait." : undefined,
         "Running..."
-      ]
-        .filter((line): line is string => Boolean(line))
-        .join("\n"));
+      ]));
     }
 
     if (job.status !== "needs_approval") {
@@ -146,8 +145,8 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
     }
   }
 
-  async function handlePanic(ctx: any, text: string): Promise<void> {
-    const arg = text === "/panic" ? "status" : text.slice("/panic ".length).trim().toLowerCase();
+  async function handlePanic(ctx: any, rawArg: string): Promise<void> {
+    const arg = rawArg.toLowerCase() || "status";
 
     if (arg === "status") {
       const admin = await orchestrator.getAdminState();
@@ -270,17 +269,67 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
     return job.requesterId === userId && job.chatId === chatId;
   }
 
+  // ── Command dispatch table ───────────────────────────────────────────
+  // Each entry handles a bot command. `args` is the trimmed text after the
+  // command prefix (empty string for exact-match invocations like "/context").
+  type CmdHandler = (args: string, ctx: any, fromId: string, chatId: string, threadId: string | undefined) => Promise<void>;
+  interface CmdEntry { cmd: string; ownerOnly?: boolean; handler: CmdHandler }
+
+  const commandTable: CmdEntry[] = [
+    { cmd: "/start",  handler: async (_, ctx) => ctx.reply(helpText()) },
+    { cmd: "/help",   handler: async (_, ctx) => ctx.reply(helpText()) },
+    { cmd: "/pairings", ownerOnly: true, handler: async (_, ctx) => {
+      const pending = pairings.listPending();
+      if (pending.length === 0) { await ctx.reply("No pending pairing requests."); return; }
+      const summary = pending.map((e) => `code=${e.code} user=${e.userId} created=${e.createdAt}`).join("\n");
+      await ctx.reply(`Pending pairings:\n${summary}`);
+    }},
+    { cmd: "/approvepair", ownerOnly: true, handler: async (args, ctx) => {
+      const code = args.toUpperCase();
+      if (!code) { await ctx.reply("Usage: /approvepair <CODE>"); return; }
+      const approved = pairings.approveCode(code);
+      if (!approved) { await ctx.reply(`No pending pairing found for code ${code}.`); return; }
+      await ctx.reply(`Approved user ${approved.userId}`);
+    }},
+    { cmd: "/panic", ownerOnly: true, handler: async (args, ctx) => handlePanic(ctx, args) },
+    { cmd: "/status", handler: async (args, ctx, fromId, chatId, threadId) => {
+      if (!args) { await handleStatusSummary(ctx, chatId, threadId); return; }
+      await handleStatus(ctx, fromId, chatId, args);
+    }},
+    { cmd: "/approve", handler: async (args, ctx, fromId) => {
+      if (!args) { await ctx.reply("Usage: /approve <jobId>"); return; }
+      await handleApproveJob(ctx, fromId, args);
+    }},
+    { cmd: "/abort", handler: async (args, ctx, fromId, chatId) => {
+      if (!args) { await ctx.reply("Usage: /abort <jobId>"); return; }
+      await handleAbortJob(ctx, fromId, chatId, args);
+    }},
+    { cmd: "/context", handler: async (_, ctx, _fromId, chatId, threadId) => handleContext(ctx, chatId, threadId) },
+    { cmd: "/new",   handler: async (args, ctx, fromId, chatId, threadId) => handleResetSession(ctx, fromId, chatId, threadId, args) },
+    { cmd: "/reset", handler: async (args, ctx, fromId, chatId, threadId) => handleResetSession(ctx, fromId, chatId, threadId, args) },
+    { cmd: "/task", handler: async (args, ctx, fromId) => {
+      if (!args) { await ctx.reply("Usage: /task <request>"); return; }
+      if (!(await enforcePromptPolicies(ctx, fromId, args))) return;
+      await submitJob(ctx, args, "task", false);
+    }},
+    { cmd: "/run", handler: async (args, ctx, fromId) => {
+      if (runOwnerOnly && !pairings.isOwner(fromId)) { await ctx.reply("/run is owner-only in this deployment."); return; }
+      if (!args) { await ctx.reply("Usage: /run <command>"); return; }
+      if (!(await enforcePromptPolicies(ctx, fromId, args))) return;
+      await submitJob(ctx, args, "run", true);
+    }},
+  ];
+
   async function handleTextMessage(ctx: any): Promise<void> {
     try {
       const text = ctx.message.text.trim();
-      const fromId = String(ctx.from?.id ?? "");
+      const fromId = parseSender(ctx);
       const chatId = String(ctx.chat.id);
       const threadId = ctx.message.message_thread_id ? String(ctx.message.message_thread_id) : undefined;
 
-      if (!fromId) {
-        return;
-      }
+      if (!fromId) return;
 
+      // /whoami works without pairing (users need it to request pairing)
       if (text === "/whoami") {
         await ctx.reply(`telegram_user_id=${fromId}`);
         return;
@@ -291,151 +340,15 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
         return;
       }
 
-      if (text === "/start" || text === "/help") {
-        await ctx.reply(helpText());
-        return;
-      }
-
-      if (text === "/pairings") {
-        if (!pairings.isOwner(fromId)) {
+      // Dispatch: find matching command by exact match or prefix
+      for (const entry of commandTable) {
+        const args = matchArgs(text, entry.cmd);
+        if (args === null) continue;
+        if (entry.ownerOnly && !pairings.isOwner(fromId)) {
           await ctx.reply("Owner-only command.");
           return;
         }
-
-        const pending = pairings.listPending();
-        if (pending.length === 0) {
-          await ctx.reply("No pending pairing requests.");
-          return;
-        }
-
-        const summary = pending
-          .map((entry) => `code=${entry.code} user=${entry.userId} created=${entry.createdAt}`)
-          .join("\n");
-        await ctx.reply(`Pending pairings:\n${summary}`);
-        return;
-      }
-
-      if (text.startsWith("/approvepair ")) {
-        if (!pairings.isOwner(fromId)) {
-          await ctx.reply("Owner-only command.");
-          return;
-        }
-
-        const code = text.slice("/approvepair ".length).trim().toUpperCase();
-        if (!code) {
-          await ctx.reply("Usage: /approvepair <CODE>");
-          return;
-        }
-
-        const approved = pairings.approveCode(code);
-        if (!approved) {
-          await ctx.reply(`No pending pairing found for code ${code}.`);
-          return;
-        }
-
-        await ctx.reply(`Approved user ${approved.userId}`);
-        return;
-      }
-
-      if (text === "/panic" || text.startsWith("/panic ")) {
-        if (!pairings.isOwner(fromId)) {
-          await ctx.reply("Owner-only command.");
-          return;
-        }
-
-        await handlePanic(ctx, text);
-        return;
-      }
-
-      if (text === "/status") {
-        await handleStatusSummary(ctx, chatId, threadId);
-        return;
-      }
-
-      if (text.startsWith("/status ")) {
-        const jobId = text.slice("/status ".length).trim();
-        if (!jobId) {
-          await ctx.reply("Usage: /status <jobId>");
-          return;
-        }
-
-        await handleStatus(ctx, fromId, chatId, jobId);
-        return;
-      }
-
-      if (text.startsWith("/approve ")) {
-        const jobId = text.slice("/approve ".length).trim();
-        if (!jobId) {
-          await ctx.reply("Usage: /approve <jobId>");
-          return;
-        }
-
-        await handleApproveJob(ctx, fromId, jobId);
-        return;
-      }
-
-      if (text.startsWith("/abort ")) {
-        const jobId = text.slice("/abort ".length).trim();
-        if (!jobId) {
-          await ctx.reply("Usage: /abort <jobId>");
-          return;
-        }
-
-        await handleAbortJob(ctx, fromId, chatId, jobId);
-        return;
-      }
-
-      if (text === "/context") {
-        await handleContext(ctx, chatId, threadId);
-        return;
-      }
-
-      if (text === "/new" || text.startsWith("/new ")) {
-        const remainder = text.slice("/new".length).trim();
-        await handleResetSession(ctx, fromId, chatId, threadId, remainder);
-        return;
-      }
-
-      if (text === "/reset" || text.startsWith("/reset ")) {
-        const remainder = text.slice("/reset".length).trim();
-        await handleResetSession(ctx, fromId, chatId, threadId, remainder);
-        return;
-      }
-
-      if (text.startsWith("/task ")) {
-        const prompt = text.slice("/task ".length).trim();
-        if (!prompt) {
-          await ctx.reply("Usage: /task <request>");
-          return;
-        }
-
-        const limited = await enforcePromptPolicies(ctx, fromId, prompt);
-        if (!limited) {
-          return;
-        }
-
-        await submitJob(ctx, prompt, "task", false);
-        return;
-      }
-
-      if (text.startsWith("/run ")) {
-        if (runOwnerOnly && !pairings.isOwner(fromId)) {
-          await ctx.reply("/run is owner-only in this deployment.");
-          return;
-        }
-
-        const command = text.slice("/run ".length).trim();
-        if (!command) {
-          await ctx.reply("Usage: /run <command>");
-          return;
-        }
-
-        const limited = await enforcePromptPolicies(ctx, fromId, command);
-        if (!limited) {
-          return;
-        }
-
-        await submitJob(ctx, command, "run", true);
+        await entry.handler(args, ctx, fromId, chatId, threadId);
         return;
       }
 
@@ -444,11 +357,8 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
         return;
       }
 
-      const limited = await enforcePromptPolicies(ctx, fromId, text);
-      if (!limited) {
-        return;
-      }
-
+      // Plain text → task
+      if (!(await enforcePromptPolicies(ctx, fromId, text))) return;
       await submitJob(ctx, text, "task", false);
     } catch (error) {
       await ctx.reply(`Request failed: ${formatError(error)}`);
@@ -456,6 +366,13 @@ export function createCommandRouter(cfg: CommandRouterConfig): CommandRouter {
   }
 
   return { handleTextMessage, handleUnpairedMessage, enforcePromptPolicies, submitJob };
+}
+
+/** Returns the trimmed args after a command prefix, or null if not matched. */
+function matchArgs(text: string, cmd: string): string | null {
+  if (text === cmd) return "";
+  if (text.startsWith(cmd + " ")) return text.slice(cmd.length).trim();
+  return null;
 }
 
 function mergeJobMetadata(
@@ -475,7 +392,7 @@ function mergeJobMetadata(
 }
 
 function renderJobStatus(job: Job): string {
-  return [
+  return compactLines([
     `job: ${job.id}`,
     `status: ${job.status}`,
     `kind: ${job.kind}`,
@@ -484,19 +401,15 @@ function renderJobStatus(job: Job): string {
     `created: ${job.createdAt}`,
     `updated: ${job.updatedAt}`,
     job.workerId ? `worker: ${job.workerId}` : undefined
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n");
+  ]);
 }
 
 function renderAdminState(admin: { paused: boolean; pauseReason?: string; updatedAt: string }): string {
-  return [
+  return compactLines([
     `paused: ${admin.paused}`,
     admin.pauseReason ? `reason: ${admin.pauseReason}` : undefined,
     `updated: ${admin.updatedAt}`
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n");
+  ]);
 }
 
 function renderSessionSummary(
@@ -506,15 +419,13 @@ function renderSessionSummary(
   generation: number,
   lastResetAt: string
 ): string {
-  return [
+  return compactLines([
     `chat: ${chatId}`,
     threadId ? `thread: ${threadId}` : undefined,
     `session: ${sessionKey}`,
     `session_generation: ${generation}`,
     `session_reset_at: ${lastResetAt}`
-  ]
-    .filter((line): line is string => Boolean(line))
-    .join("\n");
+  ]);
 }
 
 function helpText(): string {
